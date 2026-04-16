@@ -287,6 +287,7 @@ const REQUIRED_TABS: { name: string; headers?: string[] }[] = [
   {
     name: "1.21 - Inbound",
     headers: ["ID", "Timestamp", "Email", "Name", "Role Relevance", "Ack Email Status", "DQ Email Status", "Comments"],
+    // Note: additional columns from Google Form CSVs are appended dynamically on upload
   },
   {
     name: "1.3 - Shortlist",
@@ -296,7 +297,7 @@ const REQUIRED_TABS: { name: string; headers?: string[] }[] = [
     name: "1.4 - Interview",
     headers: ["ID", "First Name", "Last Name", "Email", "LinkedIn Profile", "Interview Status", "Current Stage", "Feedback Form", "DQ Stage", "Notes", "Candidate Priority", "Source", "Date of Transfer", "Last Action", "STR Email Status"],
   },
-  { name: "1.5 - Logging" },
+  { name: "1.5 - Logging", headers: ["MadilynState"] },
   { name: "1.6 - Interview Template" },
   { name: "1.7 - Evaluation" },
   { name: "Messages" },
@@ -527,7 +528,7 @@ export function addLinkedInSearch(search: Omit<LinkedInSearch, "id">): Promise<L
   return withLock(() => _addLinkedInSearch(search));
 }
 async function _addLinkedInSearch(search: Omit<LinkedInSearch, "id">): Promise<LinkedInSearch> {
-  const id = uuidv4().slice(0, 8);
+  const id = `LS-${uuidv4().slice(0, 8)}`;
   await appendRows("1.15 - LinkedIn Searches", [[
     id,
     search.persona,
@@ -608,7 +609,7 @@ async function _importProfilesFromCSV(csvData: string): Promise<{ imported: numb
       continue;
     }
 
-    const id = uuidv4().slice(0, 8);
+    const id = `OB-${uuidv4().slice(0, 8)}`;
     newRows.push([
       id,
       getVal(["first name", "firstname"]),
@@ -703,6 +704,171 @@ async function _getInboundCandidates(): Promise<InboundCandidate[]> {
   }));
 }
 
+export function importInboundCSV(csvData: string): Promise<{ imported: number; duplicates: number; columnsAdded: string[] }> {
+  return withLock(() => _importInboundCSV(csvData));
+}
+async function _importInboundCSV(csvData: string): Promise<{ imported: number; duplicates: number; columnsAdded: string[] }> {
+  const lines = csvData.split("\n").filter((l) => l.trim());
+  if (lines.length < 2) return { imported: 0, duplicates: 0, columnsAdded: [] };
+
+  const csvHeaders = parseCSVLine(lines[0]).map((h) => h.trim().replace(/^"|"$/g, ""));
+
+  // Read existing sheet to get current headers and emails for dedup
+  const existing = await readSheet("1.21 - Inbound");
+  const currentHeaders = existing.length > 0 ? existing[0] : [];
+  const existingEmails = new Set<string>();
+  if (currentHeaders.length > 0) {
+    const emailCol = findCol(currentHeaders, "Email");
+    for (let i = 1; i < existing.length; i++) {
+      const email = val(existing[i], emailCol);
+      if (email) existingEmails.add(email.toLowerCase().trim());
+    }
+  }
+
+  // Our core columns that always exist
+  const coreHeaders = ["ID", "Timestamp", "Email", "Name", "Role Relevance", "Ack Email Status", "DQ Email Status", "Comments"];
+
+  // Detect which CSV columns map to our core columns
+  const csvColMap: Record<string, number> = {};
+  csvHeaders.forEach((h, i) => { csvColMap[h.toLowerCase().trim()] = i; });
+
+  // Find new form-specific columns not in our core headers and not already in sheet
+  const knownLower = new Set([...coreHeaders.map((h) => h.toLowerCase()), ...currentHeaders.map((h) => h.toLowerCase())]);
+  const newFormCols: string[] = [];
+  for (const h of csvHeaders) {
+    if (!knownLower.has(h.toLowerCase().trim()) && h.trim()) {
+      newFormCols.push(h.trim());
+      knownLower.add(h.toLowerCase().trim());
+    }
+  }
+
+  // Build the full header row (core + existing extras + new form cols)
+  let fullHeaders: string[];
+  if (currentHeaders.length > 0) {
+    fullHeaders = [...currentHeaders, ...newFormCols];
+  } else {
+    fullHeaders = [...coreHeaders, ...newFormCols];
+  }
+
+  // If we added new columns, rewrite the header row
+  if (newFormCols.length > 0 || currentHeaders.length === 0) {
+    await writeRange(`'1.21 - Inbound'!A1`, [fullHeaders]);
+    invalidateCache("1.21 - Inbound");
+  }
+
+  // Helper to get value from CSV row
+  const getCSVVal = (row: string[], keys: string[]): string => {
+    for (const k of keys) {
+      const idx = csvColMap[k.toLowerCase().trim()];
+      if (idx !== undefined && row[idx]) return row[idx].trim();
+    }
+    return "";
+  };
+
+  // Parse and insert rows
+  const newRows: (string | number | null)[][] = [];
+  let duplicates = 0;
+
+  for (let i = 1; i < lines.length; i++) {
+    const values = parseCSVLine(lines[i]);
+    if (values.length < 2) continue;
+
+    const email = getCSVVal(values, ["email", "email address", "e-mail", "emailaddress"]);
+    if (email && existingEmails.has(email.toLowerCase().trim())) {
+      duplicates++;
+      continue;
+    }
+
+    const id = `IB-${uuidv4().slice(0, 8)}`;
+    const timestamp = getCSVVal(values, ["timestamp", "submitted at", "date", "submission date"]) || new Date().toISOString();
+    const name = getCSVVal(values, ["name", "full name", "candidate name"]) ||
+      `${getCSVVal(values, ["first name", "firstname"])} ${getCSVVal(values, ["last name", "lastname"])}`.trim();
+
+    // Build row matching fullHeaders order
+    const row: (string | null)[] = [];
+    for (const h of fullHeaders) {
+      const hLower = h.toLowerCase();
+      if (h === "ID") row.push(id);
+      else if (h === "Timestamp") row.push(timestamp);
+      else if (h === "Email") row.push(email);
+      else if (h === "Name") row.push(name);
+      else if (h === "Role Relevance") row.push("");
+      else if (h === "Ack Email Status") row.push("");
+      else if (h === "DQ Email Status") row.push("");
+      else if (h === "Comments") row.push("");
+      else {
+        // Map from CSV column
+        const idx = csvColMap[hLower];
+        row.push(idx !== undefined ? (values[idx] || "").trim() : "");
+      }
+    }
+
+    newRows.push(row);
+    if (email) existingEmails.add(email.toLowerCase().trim());
+  }
+
+  if (newRows.length > 0) {
+    await appendRows("1.21 - Inbound", newRows);
+  }
+
+  return { imported: newRows.length, duplicates, columnsAdded: newFormCols };
+}
+
+export function updateInboundRelevance(candidateId: string, relevance: RoleRelevance): Promise<void> {
+  return withLock(() => _updateInboundRelevance(candidateId, relevance));
+}
+async function _updateInboundRelevance(candidateId: string, relevance: RoleRelevance): Promise<void> {
+  const rows = await readSheet("1.21 - Inbound");
+  if (rows.length === 0) return;
+  const headers = rows[0];
+  const idCol = findCol(headers, "ID");
+  const relCol = findCol(headers, "Role Relevance");
+  if (idCol < 0 || relCol < 0) return;
+
+  for (let i = 1; i < rows.length; i++) {
+    if ((rows[i]?.[idCol] || "").trim() === candidateId) {
+      await updateCell("1.21 - Inbound", i + 1, relCol + 1, relevance);
+      break;
+    }
+  }
+
+  // Auto-transfer to shortlist if Yes or Maybe
+  if (relevance === "Yes" || relevance === "Maybe") {
+    await _transferInboundToShortlist(candidateId);
+  }
+}
+
+async function _transferInboundToShortlist(candidateId: string): Promise<void> {
+  const slRows = await readSheet("1.3 - Shortlist");
+  const slParsed = parseTable(slRows);
+  if (slParsed.data.some((r) => r["ID"] === candidateId)) return;
+
+  const inbound = await _getInboundCandidates();
+  const c = inbound.find((ic) => ic.id === candidateId);
+  if (!c) return;
+
+  const nameParts = c.name.split(" ");
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts.slice(1).join(" ") || "";
+
+  await appendRows("1.3 - Shortlist", [[
+    c.id, firstName, lastName, "", "Initiated", "", c.roleRelevance, "",
+    "", c.email, "", "", "", "", "", "", "Inbound",
+    new Date().toISOString().split("T")[0], "", "",
+  ]]);
+  invalidateCache("1.3 - Shortlist");
+}
+
+/** Get all columns from inbound sheet (for filter UI) */
+export function getInboundColumns(): Promise<string[]> {
+  return withLock(_getInboundColumns);
+}
+async function _getInboundColumns(): Promise<string[]> {
+  const rows = await readSheet("1.21 - Inbound");
+  if (rows.length === 0) return [];
+  return rows[0].filter(Boolean);
+}
+
 export function applyInboundFilters(config: FilterConfig): Promise<{ updated: number }> {
   return withLock(() => _applyInboundFilters(config));
 }
@@ -746,12 +912,17 @@ async function _applyInboundFilters(config: FilterConfig): Promise<{ updated: nu
 }
 
 function matchesFilter(value: string, filter: FilterRule): boolean {
+  const v = value.toLowerCase().trim();
+  const fv = String(filter.value).toLowerCase().trim();
   switch (filter.operator) {
-    case "equals": return value.toLowerCase() === String(filter.value).toLowerCase();
-    case "contains": return value.toLowerCase().includes(String(filter.value).toLowerCase());
+    case "equals": return v === fv;
+    case "notEquals": return v !== fv;
+    case "contains": return v.includes(fv);
     case "greaterThan": return Number(value) > Number(filter.value);
     case "lessThan": return Number(value) < Number(filter.value);
-    case "in": return Array.isArray(filter.value) ? filter.value.map((v) => v.toLowerCase()).includes(value.toLowerCase()) : false;
+    case "in": return Array.isArray(filter.value) ? filter.value.map((x) => x.toLowerCase()).includes(v) : false;
+    case "isTrue": return ["yes", "true", "1", "y"].includes(v);
+    case "isFalse": return ["no", "false", "0", "n", ""].includes(v);
     default: return false;
   }
 }

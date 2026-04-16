@@ -56,3 +56,6 @@ test_all.sh
 
 # excel files
 *.xlsx
+
+# madilyn session state
+.madilyn-state/

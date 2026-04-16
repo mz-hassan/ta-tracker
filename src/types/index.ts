@@ -313,7 +313,7 @@ export interface SheetMeta {
 // --- Filter types for 1.21 Inbound ---
 export interface FilterRule {
   field: string;
-  operator: "equals" | "contains" | "greaterThan" | "lessThan" | "in";
+  operator: "equals" | "notEquals" | "contains" | "greaterThan" | "lessThan" | "in" | "isTrue" | "isFalse";
   value: string | number | string[];
   type: "hard" | "soft";
 }

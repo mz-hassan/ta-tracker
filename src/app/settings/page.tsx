@@ -18,6 +18,8 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [credentialsPath, setCredentialsPath] = useState("");
+  const [bedrockToken, setBedrockToken] = useState("");
+  const [awsRegion, setAwsRegion] = useState("us-east-1");
   const [message, setMessage] = useState<{
     type: "success" | "error" | "warning";
     text: string;
@@ -42,7 +44,7 @@ export default function SettingsPage() {
       const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheetUrl, credentialsPath }),
+        body: JSON.stringify({ sheetUrl, credentialsPath, bedrockToken, awsRegion }),
       });
       const data = await res.json();
 
@@ -160,6 +162,38 @@ export default function SettingsPage() {
             Path to the Google Cloud service account JSON key file.
             Supports <code className="bg-slate-100 px-1 rounded">~</code> for
             home directory and relative paths.
+          </p>
+        </div>
+
+        {/* AWS Bedrock (Madilyn AI) */}
+        <div className="space-y-3 pt-4 border-t border-slate-200">
+          <h2 className="text-lg font-semibold text-slate-800">Madilyn (AI via AWS Bedrock)</h2>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-slate-700">
+              Bedrock Bearer Token
+            </label>
+            <input
+              type="password"
+              value={bedrockToken}
+              onChange={(e) => setBedrockToken(e.target.value)}
+              placeholder="ABSK..."
+              className="w-full px-4 py-3 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-slate-700">
+              AWS Region
+            </label>
+            <input
+              type="text"
+              value={awsRegion}
+              onChange={(e) => setAwsRegion(e.target.value)}
+              placeholder="us-east-1"
+              className="w-full px-4 py-3 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
+            />
+          </div>
+          <p className="text-xs text-slate-500">
+            Required for Madilyn AI assistant. Uses Claude Sonnet via Amazon Bedrock.
           </p>
         </div>
 
