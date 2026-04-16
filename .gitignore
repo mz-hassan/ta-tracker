@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Google credentials & config (NEVER commit these)
+sheets-config.json
+**/service-account*.json
+**/*credentials*.json
+**/scientific-now*.json
+
+# Test/populate scripts output
+populate_data.py
+populate_gsheets.js
+test_all.sh
