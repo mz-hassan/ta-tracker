@@ -117,6 +117,29 @@ function invalidateAll(): void {
   sheetCache.clear();
 }
 
+/** Clear all data rows from a tab (preserve header row) */
+async function clearDataRows(tabName: string): Promise<void> {
+  const { api, spreadsheetId } = await getSheets();
+  const rows = await readSheet(tabName);
+  if (rows.length <= 1) return; // only header or empty
+  const lastCol = columnToLetter(Math.max(rows[0]?.length || 1, 1));
+  const range = `'${tabName}'!A2:${lastCol}${rows.length}`;
+  await api.spreadsheets.values.clear({ spreadsheetId, range });
+  invalidateCache(tabName);
+}
+
+/** Clear all data from all tabs (preserve headers). Exported for reset endpoint. */
+export function clearAllSheetData(): Promise<void> {
+  return withLock(_clearAllSheetData);
+}
+async function _clearAllSheetData(): Promise<void> {
+  const tabs = await getTabNames();
+  for (const tab of tabs) {
+    await clearDataRows(tab);
+  }
+  invalidateAll();
+}
+
 // ============================================================
 // Low-level helpers
 // ============================================================
@@ -520,8 +543,20 @@ async function _getLinkedInSearches(): Promise<LinkedInSearch[]> {
     searchUrl: r["Search URL"] || "",
     pipelineUrl: r["Pipeline URL"] || "",
     results: Number(r["Results"]) || 0,
-    dateCreated: r["Date Created"] || "",
+    dateCreated: parseSheetDate(r["Date Created"] || ""),
   }));
+}
+
+/** Convert Google Sheets date serial number or string to YYYY-MM-DD */
+function parseSheetDate(val: string): string {
+  if (!val) return "";
+  const num = Number(val);
+  if (!isNaN(num) && num > 30000 && num < 100000) {
+    // Sheets serial: days since 1899-12-30
+    const d = new Date(Date.UTC(1899, 11, 30 + num));
+    return d.toISOString().split("T")[0];
+  }
+  return val;
 }
 
 export function addLinkedInSearch(search: Omit<LinkedInSearch, "id">): Promise<LinkedInSearch> {
@@ -539,6 +574,21 @@ async function _addLinkedInSearch(search: Omit<LinkedInSearch, "id">): Promise<L
     search.dateCreated || new Date().toISOString().split("T")[0],
   ]]);
   return { ...search, id };
+}
+
+export function updateLinkedInSearchField(id: string, field: "searchUrl" | "pipelineUrl", value: string): Promise<void> {
+  return withLock(() => _updateLinkedInSearchField(id, field, value));
+}
+async function _updateLinkedInSearchField(id: string, field: "searchUrl" | "pipelineUrl", value: string): Promise<void> {
+  // Headers: ID(1), Persona(2), Search String(3), Search URL(4), Pipeline URL(5), Results(6), Date(7)
+  const col = field === "searchUrl" ? 4 : 5;
+  const rows = await readSheet("1.15 - LinkedIn Searches");
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i]?.[0] === id) {
+      await updateCell("1.15 - LinkedIn Searches", i + 1, col, value);
+      return;
+    }
+  }
 }
 
 // ============================================================

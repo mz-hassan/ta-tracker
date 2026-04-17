@@ -1,428 +1,572 @@
-import fs from "fs";
-import path from "path";
-import { getSheetData, updateSheetCell, ensureSheets as ensureGSheets } from "@/lib/google-sheets";
+import * as db from "@/lib/db";
+import { addLinkedInSearch, updatePersona } from "@/lib/google-sheets";
+
+// ============================================================
+// Standard Persona Parameter Registry
+// ============================================================
+
+export interface PersonaParamDef {
+  key: string;
+  label: string;
+  type: "enum" | "range" | "text" | "priority";
+  options?: string[];
+  category: "standard" | "optional";
+  description: string;
+}
+
+export const STANDARD_PERSONA_PARAMS: PersonaParamDef[] = [
+  { key: "designation", label: "Designation / Title", type: "text", category: "standard", description: "Target role titles" },
+  { key: "years_exp", label: "Years of Experience", type: "range", category: "standard", description: "Required experience range" },
+  { key: "exp_sub200", label: "<200 Co. Experience", type: "enum", options: ["Yes", "No"], category: "standard", description: "Has worked in a company with fewer than 200 employees (Yes/No)" },
+  { key: "zero_to_one", label: "0→1 Experience", type: "enum", options: ["Yes", "No"], category: "standard", description: "Has experience building something from scratch, 0 to 1 (Yes/No)" },
+  { key: "saas_fintech", label: "SaaS / Fintech", type: "text", category: "standard", description: "SaaS/Fintech/BFSI priority" },
+  { key: "regional_exp", label: "Regional Experience", type: "text", category: "standard", description: "Geographic market experience" },
+  { key: "industries", label: "Target Industries", type: "text", category: "standard", description: "Industry verticals" },
+];
+
+export const OPTIONAL_PERSONA_PARAMS: PersonaParamDef[] = [
+  { key: "target_achievement", label: "Target Achievement", type: "text", category: "optional", description: "Sales target history" },
+  { key: "company_stage", label: "Company Stage", type: "enum", options: ["Startup", "Growth", "Scale-up", "Enterprise"], category: "optional", description: "Company stage preference" },
+  { key: "education", label: "Education", type: "text", category: "optional", description: "Education preferences" },
+  { key: "leadership_exp", label: "Leadership Experience", type: "priority", options: ["Must", "Good to have", "NA"], category: "optional", description: "People management experience" },
+  { key: "domain_expertise", label: "Domain Expertise", type: "text", category: "optional", description: "Domain knowledge" },
+  { key: "gtm_ownership", label: "GTM Ownership", type: "priority", options: ["Must", "Good to have", "NA"], category: "optional", description: "GTM strategy ownership" },
+];
 
 // ============================================================
 // Types
 // ============================================================
 
-export interface MadilynMessage {
-  role: "user" | "assistant";
-  content: string;
-}
+export interface SuggestionOption { id: string; text: string; }
+export interface SuggestionQuestion { id: string; text: string; options: SuggestionOption[]; allowCustom: boolean; }
+export interface PersonaParam { key: string; value: string; }
+export interface StructuredPersona { id: string; name: string; priority: number; params: PersonaParam[]; nonNegotiable: string; description: string; }
+export interface LinkedInSearchString { personaId: string; personaName: string; primary: string; alternate?: string; }
+export interface EvalMatrixEntry { round: string; skillArea: string; objective: string; questions: string; goodAnswer: string; badAnswer: string; }
 
-export interface PositionFields {
-  // Basics
-  roleTitle: string;
-  department: string;
-  level: string;
-  location: string;
-  reportingTo: string;
-  // Role Specific
-  mission: string;
-  jd: string;
-  keyOutcomes: string;
-  topOutcome: string;
-  competenciesMustHave: string;
-  competenciesGoodToHave: string;
-  topThreeCompetencies: string;
-  roleProgression: string;
-  whyJoin: string;
-  // Org Level
-  whyThisRole: string;
-  whyNow: string;
-  whyThisLevel: string;
-  roi: string;
-  replacementOrFresh: string;
-  timeline: string;
-  orgPriority: string;
-  // TA Specific
-  yearsOfExperience: string;
-  baseCompensation: string;
-  bonus: string;
-  compDifferentiator: string;
-  typicalDesignations: string;
-  linkedinSearch: string;
-  // Hiring Process
-  hiringManager: string;
-  reportingManager: string;
-  interviewProcess: string;
-  interviewers: string;
-  targetOrgs: string;
-  handsOffOrgs: string;
-  assignment: string;
-  // Additional (from Kiket)
-  redFlags: string;
-  idealProfile: string;
-}
-
-export interface PersonaSuggestion {
-  id: string;
-  name: string;
-  priority: number;
-  description: string;
-  yearsExp: string;
-  industry: string;
-  keySkills: string;
-  targetCompanies: string;
-  locationPref: string;
-  education: string;
-  signals: string;
-}
-
-export interface MadilynState {
-  messages: MadilynMessage[];
-  fields: Partial<PositionFields>;
-  personas: PersonaSuggestion[];
-  transcript: string;
-  phase: "greeting" | "transcript_review" | "conversation" | "personas" | "complete";
-  pendingQuestions: string[];
-}
+export type PositionFields = Record<string, string>;
 
 // ============================================================
-// State management — persisted to Google Sheets "1.5 - Logging" tab
-// Row 1: Headers
-// Row 2: JSON blob of MadilynState (single row, single source of truth)
-// ============================================================
-
-const LOGGING_TAB = "1.5 - Logging";
-const STATE_COL_HEADER = "MadilynState";
-
-// In-memory cache to avoid reading sheets on every call within a request
-let _cachedState: MadilynState | undefined;
-let _cacheTime = 0;
-const STATE_CACHE_TTL = 5000;
-
-const DEFAULT_STATE: MadilynState = {
-  messages: [],
-  fields: {},
-  personas: [],
-  transcript: "",
-  phase: "greeting",
-  pendingQuestions: [],
-};
-
-export async function loadState(_sessionId?: string): Promise<MadilynState> {
-  if (_cachedState && Date.now() - _cacheTime < STATE_CACHE_TTL) {
-    return _cachedState;
-  }
-  try {
-    const { headers, rows } = await getSheetData(LOGGING_TAB);
-    if (rows.length > 0 && rows[0][STATE_COL_HEADER]) {
-      const state = JSON.parse(rows[0][STATE_COL_HEADER]);
-      const loaded: MadilynState = { ...DEFAULT_STATE, ...state };
-      _cachedState = loaded;
-      _cacheTime = Date.now();
-      return loaded;
-    }
-  } catch {
-    // Sheet might not have the column yet
-  }
-  return { ...DEFAULT_STATE };
-}
-
-export async function saveState(_sessionId: string, state: MadilynState): Promise<void> {
-  _cachedState = state;
-  _cacheTime = Date.now();
-
-  try {
-    // Always write to row 2 (row 1 is header, set by ensureSheets)
-    await updateSheetCell(LOGGING_TAB, 2, STATE_COL_HEADER, JSON.stringify(state));
-  } catch (e) {
-    // Fallback: write to local file if sheets unavailable
-    const stateDir = path.join(process.cwd(), ".madilyn-state");
-    if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(state));
-  }
-}
-
-// ============================================================
-// LLM Client (AWS Bedrock via Bearer Token)
+// LLM Client (AWS Bedrock)
 // ============================================================
 
 const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
 const BEDROCK_REGION = process.env.AWS_REGION || "us-east-1";
 
-/** Call Claude via Bedrock Converse REST API with bearer token auth */
 async function callLLM(
   system: string,
-  messages: { role: "user" | "assistant"; content: string }[]
+  messages: { role: "user" | "assistant"; content: string }[],
+  maxTokens = 4096
 ): Promise<string> {
   const token = process.env.AWS_BEARER_TOKEN_BEDROCK;
-  if (!token) {
-    throw new Error("AWS_BEARER_TOKEN_BEDROCK not set. Add it in Settings.");
-  }
+  if (!token) throw new Error("AWS_BEARER_TOKEN_BEDROCK not set. Add it in Settings.");
 
-  const region = BEDROCK_REGION;
-  const modelId = BEDROCK_MODEL_ID;
-  const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(modelId)}/converse`;
-
+  const url = `https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/model/${encodeURIComponent(BEDROCK_MODEL_ID)}/converse`;
   const body = {
     system: [{ text: system }],
-    messages: messages.map((m) => ({
-      role: m.role,
-      content: [{ text: m.content }],
-    })),
-    inferenceConfig: {
-      maxTokens: 4096,
-      temperature: 0.7,
-    },
+    messages: messages.map((m) => ({ role: m.role, content: [{ text: m.content }] })),
+    inferenceConfig: { maxTokens, temperature: 0.7 },
   };
 
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Bedrock API error (${res.status}): ${errText}`);
-  }
-
+  if (!res.ok) { const err = await res.text(); throw new Error(`Bedrock API error (${res.status}): ${err}`); }
   const data = await res.json();
-  const output = data.output;
-  if (output?.message?.content?.[0]?.text) {
-    return output.message.content[0].text;
-  }
-  return "";
+  return data.output?.message?.content?.[0]?.text || "";
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+function trimMessages(messages: db.ChatMessage[], maxPairs: number): db.ChatMessage[] {
+  if (messages.length <= maxPairs * 2) return messages;
+  return messages.slice(-(maxPairs * 2));
+}
+
+function buildJdContext(fields: PositionFields): string {
+  const filled = Object.entries(fields).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${v}`).join("\n");
+  return filled || "(No JD fields filled yet)";
+}
+
+function buildPersonaSummary(personas: StructuredPersona[]): string {
+  return personas.map((p) => {
+    const paramStr = p.params.map((pr) => `${pr.key}: ${pr.value}`).join(", ");
+    return `P${p.priority} "${p.name}": ${paramStr}${p.nonNegotiable ? ` | Non-neg: ${p.nonNegotiable}` : ""}`;
+  }).join("\n");
 }
 
 // ============================================================
 // System Prompts
 // ============================================================
 
-const MADILYN_SYSTEM = `You are Madilyn, an expert Talent Acquisition consultant at HyperVerge. You help TAs define hiring positions precisely by asking smart, targeted questions.
+const JD_SYSTEM = `You are a position-creation assistant. Your ONLY job is to help fill a structured JD form by extracting info from transcripts and asking the TA clarifying questions.
 
-## Your Role
-- You help TAs fill out position creation forms after their kickoff calls with Hiring Managers
-- You extract information from meeting transcripts when provided
-- You ask clarifying questions — never assume things that aren't obvious
-- You challenge vague requirements (e.g., "Why VP and not Director?", "Is location a hard requirement?")
-- You suggest improvements but always defer to the TA's judgment
+## YOUR SCOPE — what you CAN do
+- Extract information from kickoff call transcripts
+- Ask the TA questions to fill empty JD fields
+- Suggest likely answers for each question as clickable options
+- Accept corrections and update fields
 
-## Your Personality
-- Professional but warm, like a senior TA mentor
-- Direct — you don't waste time with fluff
-- You push back constructively on bloated requirements ("Every extra must-have halves your candidate pool")
-- You acknowledge when information is sufficient and move on
+## OUT OF SCOPE — NEVER do these
+- Do NOT suggest sending emails, forms, or messages to anyone
+- Do NOT suggest scheduling meetings or calls
+- Do NOT suggest next steps beyond filling this form (no "share with HM", "send for approval", etc.)
+- Do NOT give hiring advice, market commentary, or opinions
+- Do NOT suggest sourcing strategies or candidate outreach
+- Do NOT comment on compensation competitiveness
+- Do NOT add pleasantries, encouragement, or filler ("Great!", "That's helpful!", etc.)
 
-## Fields You Need to Fill
-You are collecting information for these fields. Track which ones are filled vs empty:
-
+## Fields to Fill
 **Basics:** roleTitle, department, level, location, reportingTo
-**Role Specific:** mission, jd, keyOutcomes, topOutcome, competenciesMustHave, competenciesGoodToHave, topThreeCompetencies, roleProgression, whyJoin
-**Org Level:** whyThisRole, whyNow, whyThisLevel, roi, replacementOrFresh, timeline, orgPriority
-**TA Specific:** yearsOfExperience, baseCompensation, bonus, compDifferentiator, typicalDesignations, linkedinSearch
-**Hiring Process:** hiringManager, reportingManager, interviewProcess, interviewers, targetOrgs, handsOffOrgs, assignment
-**Additional:** redFlags, idealProfile
+**Role:** mission, jd, keyOutcomes, topOutcome, competenciesMustHave, competenciesGoodToHave, topThreeCompetencies, roleProgression, whyJoin
+**Org:** whyThisRole, whyNow, whyThisLevel, roi, replacementOrFresh, timeline, orgPriority
+**TA:** yearsOfExperience, baseCompensation, bonus, compDifferentiator, typicalDesignations, linkedinSearch
+**Process:** hiringManager, reportingManager, interviewProcess, interviewers, targetOrgs, handsOffOrgs, assignment
+**Other:** redFlags, idealProfile
 
-## Rules
-1. When a transcript is provided, extract ALL available information first, then ask about gaps
-2. Don't ask about fields that are already clearly answered
-3. Group related questions (max 2-3 per message)
-4. When enough info exists for personas, suggest them
-5. For every field you fill, explain briefly what you extracted and from where
-6. If the TA corrects you, accept it immediately
-7. Output field updates as JSON blocks when you have data to fill
+## Workflow
+1. If transcript provided → extract ALL fields you can, output them, then ask about remaining gaps
+2. Ask 2-3 unfilled fields at a time with suggested answers
+3. When the TA answers, update fields and move to the next gap
+4. When all critical fields are filled, say "JD complete" and stop
 
-## Output Format for Field Updates
-When you have information to fill in fields, include a JSON block:
+## Output Formats
+Field updates:
 \`\`\`fields
-{"roleTitle": "Business Analyst", "department": "Analytics", "level": "IC2/IC3"}
+{"roleTitle":"...","department":"..."}
 \`\`\`
 
-## Output Format for Persona Suggestions
-When ready to suggest personas, include:
+Questions with clickable options (ALWAYS include when asking):
+\`\`\`suggestions
+[{"id":"q1","text":"Reporting to?","options":[{"id":"a","text":"VP Eng"},{"id":"b","text":"CTO"},{"id":"c","text":"Director"}],"allowCustom":true}]
+\`\`\`
+
+## Style
+- 1-2 sentences max per response section. No fluff.
+- List extracted fields briefly, then ask gaps.
+- Every question MUST have a suggestions block with options.`;
+
+const PERSONA_SYSTEM = `You are a persona-building assistant. Your ONLY job is to create structured candidate personas from a completed JD by asking the TA priority/trade-off questions.
+
+## YOUR SCOPE — what you CAN do
+- Identify which default parameters are relevant to this role
+- Ask trade-off questions to determine priority ordering
+- Generate 4-6 ranked personas, each a combination of parameter values
+- Accept edits to personas
+
+## OUT OF SCOPE — NEVER do these
+- Do NOT suggest sourcing strategies, outreach, or where to find candidates
+- Do NOT suggest sending anything to anyone
+- Do NOT give hiring advice or market opinions
+- Do NOT suggest next steps beyond persona creation
+- Do NOT add pleasantries or filler
+- Do NOT add parameters beyond the defaults unless the TA explicitly asks
+- NEVER include target companies, specific company names, or company lists in personas
+- exp_sub200 and zero_to_one are boolean fields — value must be "Yes" or "No" only
+
+## Default Parameters (ONLY use these)
+${STANDARD_PERSONA_PARAMS.map((p) => `- ${p.key}: ${p.label}`).join("\n")}
+
+Optional params (ONLY if TA explicitly requests): ${OPTIONAL_PERSONA_PARAMS.map((p) => p.key).join(", ")}
+
+## Workflow
+1. Read the JD, pick which default params are relevant → output active_params
+2. Ask 1-2 trade-off questions: "Between X and Y, which is higher priority?" with options
+3. After getting answers, generate personas → output personas block
+4. Done. Wait for edits if any.
+
+## Persona Rules
+- 4-6 personas, each relaxing exactly one requirement from the previous
+- Only include params that are relevant — do NOT pad with extras
+- nonNegotiable = the hard requirements for that persona in one line
+
+## Output Formats
+\`\`\`suggestions
+[{"id":"q1","text":"SaaS+BFSI or MEA exp — priority?","options":[{"id":"a","text":"SaaS+BFSI"},{"id":"b","text":"MEA"},{"id":"c","text":"Equal"}],"allowCustom":true}]
+\`\`\`
+
+\`\`\`active_params
+["designation","years_exp","exp_sub200"]
+\`\`\`
+
 \`\`\`personas
-[{"name": "Persona 1 - Ideal", "priority": 1, "description": "...", "yearsExp": "4-6", "industry": "B2B SaaS", "keySkills": "SQL, Tableau, Python", "targetCompanies": "Razorpay, Freshworks", "locationPref": "Bangalore", "education": "IIM/ISB/Top engineering", "signals": "Has built analytics from scratch, 0-1 experience"}]
+[{"name":"SaaS Specialist","priority":1,"params":[{"key":"designation","value":"Growth Marketing"},{"key":"years_exp","value":"5+"}],"nonNegotiable":"B2B SaaS + 5+ yrs","description":"Full ideal"}]
+\`\`\`
+
+## Style
+- 1-2 sentences max. No preamble. Just ask or output.`;
+
+const LINKEDIN_SYSTEM = `Your ONLY job is to generate LinkedIn boolean search strings for each persona. No commentary, no suggestions, no advice.
+
+Rules:
+- Use proper boolean: AND, OR, NOT, quotes, parentheses
+- 1-2 strings per persona (primary + optional alternate)
+- Base strings on designation, industry terms, and key requirements from the persona
+- Output ONLY the linkedin_strings block, nothing else
+
+\`\`\`linkedin_strings
+[{"personaId":"persona-1","personaName":"Name","primary":"(\"title1\" OR \"title2\") AND \"SaaS\"","alternate":"..."}]
+\`\`\``;
+
+const TRANSCRIPT_SUMMARY_SYSTEM = `Summarize this kickoff call transcript into a factual summary (300-500 words). Include ONLY what was discussed: role context, requirements, team structure, red flags, timeline, compensation signals, target companies. No opinions or recommendations.`;
+
+const EVAL_MATRIX_SYSTEM = `Your ONLY job is to generate an interview evaluation matrix from the JD. No advice, no commentary.
+
+Rules:
+- 3-4 interview rounds, 3-4 evaluation entries per round
+- Base entries on the must-have competencies, outcomes, and red flags from the JD
+- Output ONLY the eval_matrix block
+
+\`\`\`eval_matrix
+[{"round":"Recruiter Screen","skillArea":"Motivation","objective":"Assess interest","questions":"Why this role?","goodAnswer":"Specific, references mission","badAnswer":"Generic, only about comp"}]
 \`\`\``;
 
 // ============================================================
-// Core functions
+// JD Phase
 // ============================================================
 
-export async function processTranscript(
-  sessionId: string,
-  transcript: string
-): Promise<{ message: string; fields: Partial<PositionFields>; state: MadilynState }> {
-  const state = await loadState(sessionId);
-  state.transcript = transcript;
-  state.phase = "transcript_review";
+export async function processTranscript(sessionId: string, transcript: string) {
+  db.ensureSession(sessionId);
+  db.updateSessionMeta(sessionId, { jdPhase: "transcript_review", activeMode: "jd", transcript });
 
-  const userMsg = `I just had a kickoff call with the Hiring Manager. Here's the transcript from the meeting. Please extract all the information you can for the position creation form, and tell me what's missing that I need to clarify.
+  const summaryPromise = callLLM(TRANSCRIPT_SUMMARY_SYSTEM, [{ role: "user", content: transcript }], 1024);
 
-<transcript>
-${transcript}
-</transcript>`;
+  const userMsg = `Kickoff call transcript. Extract all info for the position form. Ask about gaps with suggested answers.\n\n<transcript>\n${transcript}\n</transcript>`;
+  const messages = db.getMessages(sessionId, "jd");
+  messages.push({ role: "user", content: userMsg });
 
-  state.messages.push({ role: "user", content: userMsg });
+  const assistantMsg = await callLLM(JD_SYSTEM, messages);
+  messages.push({ role: "assistant", content: assistantMsg });
+  db.saveMessages(sessionId, "jd", messages);
 
-  const assistantMsg = await callLLM(MADILYN_SYSTEM, state.messages);
-  state.messages.push({ role: "assistant", content: assistantMsg });
-
-  // Extract fields from response
   const fields = extractFields(assistantMsg);
-  state.fields = { ...state.fields, ...fields };
-  state.phase = "conversation";
+  let suggestions = extractSuggestions(assistantMsg);
+  if (Object.keys(fields).length > 0) db.mergeJdFields(sessionId, fields);
+  db.updateSessionMeta(sessionId, { jdPhase: "conversation" });
 
-  await saveState(sessionId, state);
+  let transcriptSummary = "";
+  try { transcriptSummary = await summaryPromise; db.updateSessionMeta(sessionId, { transcriptSummary }); } catch {}
 
-  return { message: assistantMsg, fields, state };
-}
+  let displayMsg = cleanMessageForDisplay(assistantMsg);
 
-export async function chat(
-  sessionId: string,
-  userMessage: string
-): Promise<{ message: string; fields: Partial<PositionFields>; personas: PersonaSuggestion[]; state: MadilynState }> {
-  const state = await loadState(sessionId);
+  // If we extracted fields but the LLM didn't ask follow-up questions, prompt it to ask about gaps
+  if (Object.keys(fields).length > 0 && suggestions.length === 0) {
+    const allFields = db.getJdFields(sessionId);
+    const filledKeys = Object.keys(allFields).filter((k) => allFields[k]);
+    const followUpMsg = `Fields extracted: ${filledKeys.join(", ")}. Now ask about the unfilled fields with suggested answers.`;
+    messages.push({ role: "user", content: followUpMsg });
+    const followUpReply = await callLLM(JD_SYSTEM, trimMessages(messages, 12));
+    messages.push({ role: "assistant", content: followUpReply });
+    db.saveMessages(sessionId, "jd", messages);
 
-  if (state.phase === "greeting") {
-    state.phase = "conversation";
+    const followUpSuggestions = extractSuggestions(followUpReply);
+    const followUpFields = extractFields(followUpReply);
+    if (Object.keys(followUpFields).length > 0) db.mergeJdFields(sessionId, followUpFields);
+
+    const followUpDisplay = cleanMessageForDisplay(followUpReply);
+    displayMsg = displayMsg
+      ? `${displayMsg}\n\n${followUpDisplay}`
+      : followUpDisplay || `Extracted ${Object.keys(fields).length} fields.`;
+    suggestions = followUpSuggestions;
   }
 
-  // Build context about current field state
-  const filledFields = Object.entries(state.fields).filter(([, v]) => v).map(([k]) => k);
-  const allFields = [
-    "roleTitle", "department", "level", "location", "reportingTo",
-    "mission", "jd", "keyOutcomes", "topOutcome", "competenciesMustHave",
-    "competenciesGoodToHave", "topThreeCompetencies", "roleProgression", "whyJoin",
-    "whyThisRole", "whyNow", "whyThisLevel", "roi", "replacementOrFresh",
-    "timeline", "orgPriority", "yearsOfExperience", "baseCompensation", "bonus",
-    "compDifferentiator", "typicalDesignations", "linkedinSearch",
-    "hiringManager", "reportingManager", "interviewProcess", "interviewers",
-    "targetOrgs", "handsOffOrgs", "assignment", "redFlags", "idealProfile",
-  ];
-  const emptyFields = allFields.filter((f) => !filledFields.includes(f));
+  if (!displayMsg) displayMsg = `Extracted ${Object.keys(fields).length} fields from transcript.`;
 
-  const contextNote = `
-[SYSTEM CONTEXT — not visible to user]
-Currently filled fields: ${filledFields.join(", ") || "none"}
-Currently empty fields: ${emptyFields.join(", ")}
-Current field values: ${JSON.stringify(state.fields, null, 2)}
-${state.transcript ? "Transcript was provided and already processed." : "No transcript uploaded yet."}
-${state.personas.length > 0 ? `${state.personas.length} personas already suggested.` : "No personas generated yet."}
-Focus on filling the empty fields through natural conversation. When most key fields are filled, suggest personas.
-[END SYSTEM CONTEXT]`;
+  return { message: displayMsg, fields, suggestions, transcriptSummary };
+}
 
-  const enrichedMessage = userMessage + contextNote;
-  state.messages.push({ role: "user", content: enrichedMessage });
+export async function jdChat(sessionId: string, userMessage: string) {
+  db.ensureSession(sessionId);
+  const meta = db.getSessionMeta(sessionId);
+  if (meta.jdPhase === "greeting") db.updateSessionMeta(sessionId, { jdPhase: "conversation" });
 
-  const assistantMsg = await callLLM(MADILYN_SYSTEM, state.messages);
+  const currentFields = db.getJdFields(sessionId);
+  const filledKeys = Object.keys(currentFields).filter((k) => currentFields[k]);
+  const contextNote = `\n[CONTEXT: Filled: ${filledKeys.join(", ") || "none"} | Values: ${JSON.stringify(currentFields)}]`;
 
-  // Store the clean user message (without context) in display history
-  state.messages[state.messages.length - 1] = { role: "user", content: userMessage };
-  state.messages.push({ role: "assistant", content: assistantMsg });
+  const messages = db.getMessages(sessionId, "jd");
+  const trimmed = trimMessages(messages, 12);
+  const llmMessages = [...trimmed, { role: "user" as const, content: userMessage + contextNote }];
 
-  // Extract fields and personas
+  const assistantMsg = await callLLM(JD_SYSTEM, llmMessages);
+  messages.push({ role: "user", content: userMessage });
+  messages.push({ role: "assistant", content: assistantMsg });
+  db.saveMessages(sessionId, "jd", messages);
+
   const fields = extractFields(assistantMsg);
-  const personas = extractPersonas(assistantMsg);
+  const suggestions = extractSuggestions(assistantMsg);
+  if (Object.keys(fields).length > 0) db.mergeJdFields(sessionId, fields);
 
-  state.fields = { ...state.fields, ...fields };
-  if (personas.length > 0) {
-    state.personas = personas;
-    state.phase = "personas";
-  }
+  let displayMsg = cleanMessageForDisplay(assistantMsg);
+  if (Object.keys(fields).length > 0 && !displayMsg) displayMsg = `Updated ${Object.keys(fields).length} fields.`;
 
-  await saveState(sessionId, state);
-
-  return { message: assistantMsg, fields, personas, state };
-}
-
-export async function generatePersonas(
-  sessionId: string
-): Promise<{ message: string; personas: PersonaSuggestion[]; state: MadilynState }> {
-  const state = await loadState(sessionId);
-
-  const userMsg = `Based on everything we've discussed, please generate 5-6 candidate personas in priority order. For each persona, specify:
-- A descriptive name (e.g., "Persona 1 - Tier-1 Startup BA")
-- Priority ranking
-- Years of experience range
-- Industry/domain focus
-- Key skills required
-- Target companies to source from
-- Location preference
-- Education background
-- Key signals to look for in profiles
-
-Consider the role requirements, must-have competencies, target organizations, and any preferences discussed. Output them in the personas JSON format.`;
-
-  state.messages.push({ role: "user", content: userMsg });
-
-  const assistantMsg = await callLLM(MADILYN_SYSTEM, state.messages);
-  state.messages.push({ role: "assistant", content: assistantMsg });
-
-  const personas = extractPersonas(assistantMsg);
-  if (personas.length > 0) {
-    state.personas = personas;
-    state.phase = "personas";
-  }
-
-  await saveState(sessionId, state);
-
-  return { message: assistantMsg, personas: state.personas, state };
+  return { message: displayMsg, fields, suggestions };
 }
 
 // ============================================================
-// Extraction helpers
+// Persona Phase
 // ============================================================
 
-function extractFields(text: string): Partial<PositionFields> {
-  const match = text.match(/```fields\s*\n?([\s\S]*?)\n?```/);
-  if (!match) return {};
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return {};
+export async function startPersonaWorkshop(sessionId: string) {
+  db.ensureSession(sessionId);
+  const existingPersonas = db.getPersonas(sessionId);
+  const existingMessages = db.getMessages(sessionId, "persona");
+
+  // If already have personas, return existing state
+  if (existingMessages.length > 0 && existingPersonas.length > 0) {
+    const lastAssistant = [...existingMessages].reverse().find((m) => m.role === "assistant");
+    return {
+      message: cleanMessageForDisplay(lastAssistant?.content || "Personas ready. Chat to refine."),
+      suggestions: lastAssistant ? extractSuggestions(lastAssistant.content) : [],
+      activeParams: db.getSessionMeta(sessionId).activeParams,
+      personas: existingPersonas.map(dbPersonaToStructured),
+    };
   }
+
+  db.updateSessionMeta(sessionId, { activeMode: "persona", personaPhase: "param_discovery" });
+  db.saveMessages(sessionId, "persona", []); // fresh
+
+  const fields = db.getJdFields(sessionId);
+  const meta = db.getSessionMeta(sessionId);
+  const jdContext = buildJdContext(fields);
+  const summaryCtx = meta.transcriptSummary ? `\n\nKickoff Summary:\n${meta.transcriptSummary}` : "";
+
+  const userMsg = `JD for persona building:\n${jdContext}${summaryCtx}`;
+  const messages: db.ChatMessage[] = [{ role: "user", content: userMsg }];
+  const assistantMsg = await callLLM(PERSONA_SYSTEM, messages);
+  messages.push({ role: "assistant", content: assistantMsg });
+  db.saveMessages(sessionId, "persona", messages);
+
+  const activeParams = extractActiveParams(assistantMsg);
+  if (activeParams.length > 0) db.updateSessionMeta(sessionId, { activeParams });
+  const suggestions = extractSuggestions(assistantMsg);
+  const personas = extractPersonas(assistantMsg);
+  if (personas.length > 0) {
+    db.savePersonas(sessionId, personas.map(structuredToDbPersona.bind(null, sessionId)));
+    db.updateSessionMeta(sessionId, { personaPhase: "complete" });
+  }
+
+  let displayMsg = cleanMessageForDisplay(assistantMsg);
+  if (personas.length > 0 && !displayMsg) displayMsg = `${personas.length} personas created. Edit params or reorder on the left. Chat here to refine.`;
+
+  return { message: displayMsg, suggestions, activeParams, personas };
 }
 
-function extractPersonas(text: string): PersonaSuggestion[] {
-  const match = text.match(/```personas\s*\n?([\s\S]*?)\n?```/);
-  if (!match) return [];
-  try {
-    const parsed = JSON.parse(match[1]);
-    if (Array.isArray(parsed)) {
-      return parsed.map((p: any, i: number) => ({
-        id: `persona-${i + 1}`,
-        name: p.name || `Persona ${i + 1}`,
-        priority: p.priority || i + 1,
-        description: p.description || "",
-        yearsExp: p.yearsExp || p.years_exp || "",
-        industry: p.industry || "",
-        keySkills: p.keySkills || p.key_skills || "",
-        targetCompanies: p.targetCompanies || p.target_companies || "",
-        locationPref: p.locationPref || p.location_pref || p.location || "",
-        education: p.education || "",
-        signals: p.signals || "",
-      }));
+export async function personaChat(sessionId: string, userMessage: string) {
+  db.ensureSession(sessionId);
+  db.updateSessionMeta(sessionId, { activeMode: "persona" });
+
+  const fields = db.getJdFields(sessionId);
+  const jdSummary = `\n[JD: ${JSON.stringify(fields)}]`;
+
+  const messages = db.getMessages(sessionId, "persona");
+  const trimmed = trimMessages(messages, 10);
+  const llmMessages = [...trimmed, { role: "user" as const, content: userMessage + jdSummary }];
+
+  const assistantMsg = await callLLM(PERSONA_SYSTEM, llmMessages);
+  messages.push({ role: "user", content: userMessage });
+  messages.push({ role: "assistant", content: assistantMsg });
+  db.saveMessages(sessionId, "persona", messages);
+
+  const suggestions = extractSuggestions(assistantMsg);
+  const personas = extractPersonas(assistantMsg);
+  const activeParams = extractActiveParams(assistantMsg);
+
+  if (activeParams.length > 0) db.updateSessionMeta(sessionId, { activeParams });
+  if (personas.length > 0) {
+    db.savePersonas(sessionId, personas.map(structuredToDbPersona.bind(null, sessionId)));
+    db.updateSessionMeta(sessionId, { personaPhase: "complete" });
+    // Also save to Google Sheet for candidate tracking
+    for (const p of personas) {
+      const paramStr = p.params.map((pr) => `${pr.key}: ${pr.value}`).join(" | ");
+      try { await updatePersona(p.priority, p.name, paramStr); } catch {}
     }
-    return [];
-  } catch {
-    return [];
   }
+
+  const currentPersonas = db.getPersonas(sessionId).map(dbPersonaToStructured);
+  let displayMsg = cleanMessageForDisplay(assistantMsg);
+  if (personas.length > 0 && !displayMsg) displayMsg = `${personas.length} personas created. Edit params or reorder on the left. Chat here to refine.`;
+
+  return { message: displayMsg, suggestions, personas: currentPersonas, activeParams };
 }
 
-/** Strip JSON blocks from message for display */
+export function reorderPersonas(sessionId: string, personas: StructuredPersona[]) {
+  const rows = personas.map((p, i) => structuredToDbPersona(sessionId, { ...p, priority: i + 1 }));
+  db.savePersonas(sessionId, rows);
+}
+
+export function editPersonaParam(sessionId: string, personaId: string, key: string, value: string) {
+  db.updatePersonaParam(sessionId, personaId, key, value);
+}
+
+// ============================================================
+// LinkedIn Strings
+// ============================================================
+
+export async function generateLinkedInStrings(sessionId: string) {
+  const fields = db.getJdFields(sessionId);
+  const personas = db.getPersonas(sessionId).map(dbPersonaToStructured);
+
+  const userMsg = `Generate LinkedIn search strings.\n\nJD:\n${buildJdContext(fields)}\n\nPersonas:\n${buildPersonaSummary(personas)}`;
+  const assistantMsg = await callLLM(LINKEDIN_SYSTEM, [{ role: "user", content: userMsg }], 2048);
+  const strings = extractLinkedInStrings(assistantMsg);
+
+  for (const s of strings) {
+    try {
+      await addLinkedInSearch({ persona: s.personaName, searchString: s.primary, searchUrl: "", pipelineUrl: "", results: 0, dateCreated: new Date().toISOString().split("T")[0] });
+      if (s.alternate) await addLinkedInSearch({ persona: `${s.personaName} (alt)`, searchString: s.alternate, searchUrl: "", pipelineUrl: "", results: 0, dateCreated: new Date().toISOString().split("T")[0] });
+    } catch {}
+  }
+  return { strings };
+}
+
+// ============================================================
+// Evaluation Matrix
+// ============================================================
+
+export async function generateEvalMatrix(sessionId: string) {
+  const fields = db.getJdFields(sessionId);
+  const meta = db.getSessionMeta(sessionId);
+  const jdContext = buildJdContext(fields);
+  const summaryCtx = meta.transcriptSummary ? `\n\nKickoff Summary:\n${meta.transcriptSummary}` : "";
+
+  const jdMessages = db.getMessages(sessionId, "jd");
+  const recentChat = trimMessages(jdMessages, 5).filter((m) => m.role === "assistant").map((m) => m.content).join("\n---\n");
+
+  const userMsg = `Generate evaluation matrix.\n\nJD:\n${jdContext}${summaryCtx}${recentChat ? `\n\nJD discussion:\n${recentChat}` : ""}`;
+  const assistantMsg = await callLLM(EVAL_MATRIX_SYSTEM, [{ role: "user", content: userMsg }], 3000);
+  return { entries: extractEvalMatrix(assistantMsg) };
+}
+
+// ============================================================
+// State API (for frontend)
+// ============================================================
+
+export function getState(sessionId: string) {
+  db.ensureSession(sessionId);
+  const meta = db.getSessionMeta(sessionId);
+  const fields = db.getJdFields(sessionId);
+  const personas = db.getPersonas(sessionId).map(dbPersonaToStructured);
+  const jdMessages = db.getMessages(sessionId, "jd");
+
+  return {
+    fields,
+    personas,
+    activeParams: meta.activeParams,
+    jdPhase: meta.jdPhase,
+    personaPhase: meta.personaPhase,
+    activeMode: meta.activeMode,
+    transcriptSummary: meta.transcriptSummary,
+    hasTranscript: !!meta.transcript,
+    greeting: jdMessages.length === 0 ? getGreeting() : null,
+  };
+}
+
+export function getChatHistory(sessionId: string, contextKey: string) {
+  return db.getMessages(sessionId, contextKey);
+}
+
+export function updateFields(sessionId: string, fields: Record<string, string>) {
+  return db.mergeJdFields(sessionId, fields);
+}
+
+export function updateMeta(sessionId: string, updates: Partial<db.SessionMeta>) {
+  db.updateSessionMeta(sessionId, updates);
+}
+
+// ============================================================
+// Converters
+// ============================================================
+
+function dbPersonaToStructured(row: db.PersonaRow): StructuredPersona {
+  return { id: row.id, name: row.name, priority: row.priority, params: row.params, nonNegotiable: row.nonNegotiable, description: row.description };
+}
+
+function structuredToDbPersona(sessionId: string, p: StructuredPersona): db.PersonaRow {
+  return { id: p.id, sessionId, priority: p.priority, name: p.name, params: p.params, nonNegotiable: p.nonNegotiable, description: p.description };
+}
+
+// ============================================================
+// Extraction Helpers
+// ============================================================
+
+function extractFields(text: string): PositionFields {
+  const m = text.match(/```fields\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return {};
+  try { return JSON.parse(m[1]); } catch { return {}; }
+}
+
+function extractSuggestions(text: string): SuggestionQuestion[] {
+  const m = text.match(/```suggestions\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return [];
+  try {
+    const parsed = JSON.parse(m[1]);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((q: any, i: number) => ({
+      id: q.id || `q${i + 1}`, text: q.text || "",
+      options: Array.isArray(q.options) ? q.options.map((o: any, j: number) =>
+        typeof o === "string" ? { id: `${i}-${j}`, text: o } : { id: o.id || `${i}-${j}`, text: o.text || String(o) }
+      ) : [],
+      allowCustom: q.allowCustom !== false,
+    }));
+  } catch { return []; }
+}
+
+function extractPersonas(text: string): StructuredPersona[] {
+  const m = text.match(/```personas\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return [];
+  try {
+    const parsed = JSON.parse(m[1]);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((p: any, i: number) => ({
+      id: p.id || `persona-${i + 1}`, name: p.name || `Persona ${i + 1}`, priority: p.priority || i + 1,
+      params: Array.isArray(p.params) ? p.params.map((pr: any) => ({ key: pr.key || "", value: pr.value || "" })) : [],
+      nonNegotiable: p.nonNegotiable || p.non_negotiable || "", description: p.description || "",
+    }));
+  } catch { return []; }
+}
+
+function extractActiveParams(text: string): string[] {
+  const m = text.match(/```active_params\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return [];
+  try { const p = JSON.parse(m[1]); return Array.isArray(p) ? p : []; } catch { return []; }
+}
+
+function extractLinkedInStrings(text: string): LinkedInSearchString[] {
+  const m = text.match(/```linkedin_strings\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return [];
+  try {
+    const p = JSON.parse(m[1]);
+    if (!Array.isArray(p)) return [];
+    return p.map((s: any) => ({ personaId: s.personaId || "", personaName: s.personaName || "", primary: s.primary || "", alternate: s.alternate || undefined }));
+  } catch { return []; }
+}
+
+function extractEvalMatrix(text: string): EvalMatrixEntry[] {
+  const m = text.match(/```eval_matrix\s*\n?([\s\S]*?)\n?```/);
+  if (!m) return [];
+  try {
+    const p = JSON.parse(m[1]);
+    if (!Array.isArray(p)) return [];
+    return p.map((e: any) => ({ round: e.round || "", skillArea: e.skillArea || "", objective: e.objective || "", questions: e.questions || "", goodAnswer: e.goodAnswer || "", badAnswer: e.badAnswer || "" }));
+  } catch { return []; }
+}
+
 export function cleanMessageForDisplay(text: string): string {
   return text
     .replace(/```fields\s*\n?[\s\S]*?\n?```/g, "")
+    .replace(/```suggestions\s*\n?[\s\S]*?\n?```/g, "")
     .replace(/```personas\s*\n?[\s\S]*?\n?```/g, "")
+    .replace(/```active_params\s*\n?[\s\S]*?\n?```/g, "")
+    .replace(/```linkedin_strings\s*\n?[\s\S]*?\n?```/g, "")
+    .replace(/```eval_matrix\s*\n?[\s\S]*?\n?```/g, "")
     .trim();
 }
 
-/** Get greeting message */
 export function getGreeting(): string {
-  return `Hi! I'm Madilyn, your hiring consultant. I'll help you define this position precisely.
-
-**Here's how we can work together:**
-1. **Upload a transcript** from your kickoff call with the HM — I'll extract everything I can
-2. **Or just start chatting** — I'll ask the right questions to fill in the position details
-
-You can also fill in fields directly on the left panel, and I'll pick up from wherever you are.
-
-What would you like to start with?`;
+  return `I'll help fill the position creation form. Upload a kickoff transcript or start answering questions.`;
 }
