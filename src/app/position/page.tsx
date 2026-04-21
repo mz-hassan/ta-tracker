@@ -93,7 +93,7 @@ export default function PositionPage() {
       .finally(() => setInitialLoad(false));
   }, []);
 
-  // Listen for Madilyn chat updates (field changes)
+  // Listen for Marlyn chat updates (field changes)
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -101,8 +101,8 @@ export default function PositionPage() {
         setFields((prev) => ({ ...prev, ...detail.fields }));
       }
     };
-    window.addEventListener("madilyn-update", handler);
-    return () => window.removeEventListener("madilyn-update", handler);
+    window.addEventListener("marlyn-update", handler);
+    return () => window.removeEventListener("marlyn-update", handler);
   }, []);
 
   const updateField = useCallback((key: string, value: string) => {
@@ -127,9 +127,9 @@ export default function PositionPage() {
       const data = await res.json();
       if (data.fields && Object.keys(data.fields).length > 0) setFields((prev) => ({ ...prev, ...data.fields }));
       if (data.transcriptSummary) setTranscriptSummary(data.transcriptSummary);
-      // Open Madilyn panel with the transcript result + follow-up questions
+      // Open Marlyn panel with the transcript result + follow-up questions
       if (data.message) {
-        window.dispatchEvent(new CustomEvent("madilyn-transcript", {
+        window.dispatchEvent(new CustomEvent("marlyn-transcript", {
           detail: { source: "transcript", message: data.message, suggestions: data.suggestions },
         }));
       }
@@ -210,11 +210,11 @@ export default function PositionPage() {
       {/* Next step */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 text-center">
         <p className="text-sm text-slate-500 mb-2">
-          {filledCount >= 10 ? "JD looks solid. Build personas next." : "Keep filling details. Use the Madilyn button (bottom-right) for help."}
+          {filledCount >= 10 ? "JD looks solid. Set up interview rounds and evaluation matrix next." : "Keep filling details. Use the Marlyn button (bottom-right) for help."}
         </p>
         {filledCount >= 10 && (
-          <a href="/process" className="inline-block px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
-            Go to Persona Workshop
+          <a href="/evaluation-matrix" className="inline-block px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
+            Set Up Evaluation Matrix
           </a>
         )}
       </div>

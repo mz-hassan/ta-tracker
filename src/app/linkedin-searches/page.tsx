@@ -21,7 +21,7 @@ export default function LinkedInSearchesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editField, setEditField] = useState<"searchUrl" | "pipelineUrl">("searchUrl");
   const [editUrl, setEditUrl] = useState("");
-  const [form, setForm] = useState({ persona: "", searchString: "", searchUrl: "", pipelineUrl: "", results: 0 });
+  const [form, setForm] = useState({ persona: "", searchString: "" });
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(() => {
@@ -45,11 +45,13 @@ export default function LinkedInSearchesPage() {
 
   const addSearch = async () => {
     setSaving(true);
+    const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(form.searchString)}&origin=GLOBAL_SEARCH_HEADER`;
     await fetch("/api/linkedin-searches", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...form, searchUrl, pipelineUrl: "", results: 0 }),
     });
     setShowForm(false);
-    setForm({ persona: "", searchString: "", searchUrl: "", pipelineUrl: "", results: 0 });
+    setForm({ persona: "", searchString: "" });
     setSaving(false);
     load();
   };
@@ -104,7 +106,7 @@ export default function LinkedInSearchesPage() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm min-h-[60px]" placeholder="Boolean search string..." />
             </div>
           </div>
-          <button onClick={addSearch} disabled={saving || !form.persona}
+          <button onClick={addSearch} disabled={saving || !form.persona || !form.searchString}
             className="mt-4 px-6 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
             {saving ? "Saving..." : "Add Search"}
           </button>
@@ -118,7 +120,6 @@ export default function LinkedInSearchesPage() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-slate-600">Persona</th>
                 <th className="text-left px-4 py-3 font-medium text-slate-600">Search String</th>
-                <th className="text-center px-4 py-3 font-medium text-slate-600">Results</th>
                 <th className="text-left px-4 py-3 font-medium text-slate-600">Links</th>
                 <th className="text-left px-4 py-3 font-medium text-slate-600">Date</th>
               </tr>
@@ -129,38 +130,36 @@ export default function LinkedInSearchesPage() {
                   <td className="px-4 py-3">
                     <span className="px-2 py-1 bg-indigo-50 text-indigo-700 text-xs font-medium rounded-full">{s.persona}</span>
                   </td>
-                  <td className="px-4 py-3 text-slate-600 max-w-[300px]">
+                  <td className="px-4 py-3 text-slate-600 max-w-[400px]">
                     <span className="font-mono text-xs bg-slate-50 px-2 py-1 rounded block truncate select-all cursor-text" title={s.searchString}>
                       {s.searchString}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center font-semibold text-slate-700">{s.results || "—"}</td>
                   <td className="px-4 py-3">
                     {editingId === s.id ? (
-                      <div className="space-y-1">
-                        <div className="flex gap-1 items-center">
-                          <span className="text-[10px] text-slate-400 w-12">{editField === "searchUrl" ? "Search" : "Pipeline"}</span>
-                          <input type="text" value={editUrl} onChange={(e) => setEditUrl(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") handleSaveUrl(s.id, editField); if (e.key === "Escape") setEditingId(null); }}
-                            className="px-2 py-1 border rounded text-xs w-40 focus:outline-none focus:ring-1 focus:ring-indigo-400" autoFocus placeholder="Paste URL" />
-                          <button onClick={() => handleSaveUrl(s.id, editField)} className="text-xs text-indigo-600 hover:underline">Save</button>
-                          <button onClick={() => setEditingId(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
-                        </div>
+                      <div className="flex gap-1 items-center">
+                        <span className="text-[10px] text-slate-400 w-12">{editField === "searchUrl" ? "Search" : "Pipeline"}</span>
+                        <input type="text" value={editUrl} onChange={(e) => setEditUrl(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleSaveUrl(s.id, editField); if (e.key === "Escape") setEditingId(null); }}
+                          className="px-2 py-1 border rounded text-xs w-40 focus:outline-none focus:ring-1 focus:ring-indigo-400" autoFocus placeholder="Paste URL" />
+                        <button onClick={() => handleSaveUrl(s.id, editField)} className="text-xs text-indigo-600 hover:underline">Save</button>
+                        <button onClick={() => setEditingId(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
                       </div>
                     ) : (
                       <div className="flex gap-2 items-center">
                         {s.searchUrl ? (
-                          <a href={s.searchUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline">Search</a>
+                          <a href={s.searchUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline">
+                            Open in LinkedIn
+                          </a>
                         ) : (
                           <button onClick={() => { setEditingId(s.id); setEditField("searchUrl"); setEditUrl(""); }}
-                            className="text-xs text-slate-400 hover:text-indigo-600">+ Search</button>
+                            className="text-xs text-slate-400 hover:text-indigo-600">+ Add URL</button>
                         )}
-                        <span className="text-slate-300">|</span>
-                        {s.pipelineUrl ? (
-                          <a href={s.pipelineUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline">Pipeline</a>
-                        ) : (
-                          <button onClick={() => { setEditingId(s.id); setEditField("pipelineUrl"); setEditUrl(""); }}
-                            className="text-xs text-slate-400 hover:text-indigo-600">+ Pipeline</button>
+                        {s.pipelineUrl && (
+                          <>
+                            <span className="text-slate-300">|</span>
+                            <a href={s.pipelineUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 hover:underline">Pipeline</a>
+                          </>
                         )}
                       </div>
                     )}

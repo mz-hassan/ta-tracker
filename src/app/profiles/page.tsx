@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { StatusBadge } from "@/components/StatusBadge";
 import { FileUpload } from "@/components/FileUpload";
 import { fetchArray } from "@/lib/api";
@@ -14,6 +15,8 @@ export default function ProfilesPage() {
   const [search, setSearch] = useState("");
   const [relevanceFilter, setRelevanceFilter] = useState("");
   const [showUpload, setShowUpload] = useState(false);
+  const [uploadPersona, setUploadPersona] = useState("");
+  const [personas, setPersonas] = useState<{ name: string; id: string }[]>([]);
 
   const loadProfiles = useCallback(() => {
     fetchArray<CandidateProfile>("/api/profiles")
@@ -23,11 +26,21 @@ export default function ProfilesPage() {
 
   useEffect(() => { loadProfiles(); }, [loadProfiles]);
 
+  // Load personas for CSV tagging
+  useEffect(() => {
+    fetch("/api/madilyn/state?sessionId=default")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.personas?.length) setPersonas(data.personas.map((p: any) => ({ id: p.id, name: p.name })));
+      });
+  }, []);
+
   const handleUpload = async (file: File) => {
     setUploading(true);
     setUploadResult(null);
     const formData = new FormData();
     formData.append("file", file);
+    if (uploadPersona) formData.append("persona", uploadPersona);
 
     try {
       const res = await fetch("/api/upload", { method: "POST", body: formData });
@@ -52,15 +65,18 @@ export default function ProfilesPage() {
     );
   };
 
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [locationFilter, setLocationFilter] = useState("");
+
+  const allSources = [...new Set(profiles.map((p) => p.source).filter(Boolean))];
+  const allLocations = [...new Set(profiles.map((p) => p.location).filter(Boolean))];
+
   const filtered = profiles.filter((p) => {
-    const name = `${p.firstName} ${p.lastName}`.toLowerCase();
-    const matchesSearch =
-      !search ||
-      name.includes(search.toLowerCase()) ||
-      p.currentCompany?.toLowerCase().includes(search.toLowerCase()) ||
-      p.currentTitle?.toLowerCase().includes(search.toLowerCase());
-    const matchesRelevance = !relevanceFilter || p.roleRelevance === relevanceFilter;
-    return matchesSearch && matchesRelevance;
+    const text = `${p.firstName} ${p.lastName} ${p.currentCompany} ${p.currentTitle} ${p.email} ${p.headline}`.toLowerCase();
+    return (!search || text.includes(search.toLowerCase()))
+      && (!relevanceFilter || p.roleRelevance === relevanceFilter)
+      && (!sourceFilter || p.source === sourceFilter)
+      && (!locationFilter || p.location === locationFilter);
   });
 
   if (loading) {
@@ -95,6 +111,14 @@ export default function ProfilesPage() {
           <p className="text-sm text-slate-500 mb-4">
             Upload a CSV with columns: First Name, Last Name, Headline, Location, Current Title, Current Company, Email Address, Phone Number, Profile URL
           </p>
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-slate-600 mb-1">Source Persona</label>
+            <select value={uploadPersona} onChange={(e) => setUploadPersona(e.target.value)}
+              className="px-3 py-2 border border-slate-300 rounded-lg text-sm w-full max-w-xs">
+              <option value="">None / Other</option>
+              {personas.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+            </select>
+          </div>
           <FileUpload
             onUpload={handleUpload}
             accept=".csv"
@@ -124,15 +148,20 @@ export default function ProfilesPage() {
             onChange={(e) => setSearch(e.target.value)}
             className="flex-1 min-w-[200px] px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
-          <select
-            value={relevanceFilter}
-            onChange={(e) => setRelevanceFilter(e.target.value)}
-            className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
+          <select value={relevanceFilter} onChange={(e) => setRelevanceFilter(e.target.value)}
+            className="px-3 py-2 border border-slate-300 rounded-lg text-sm">
             <option value="">All Relevance</option>
-            <option value="Yes">Yes</option>
-            <option value="Maybe">Maybe</option>
-            <option value="No">No</option>
+            <option value="Yes">Yes</option><option value="Maybe">Maybe</option><option value="No">No</option>
+          </select>
+          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}
+            className="px-3 py-2 border border-slate-300 rounded-lg text-sm">
+            <option value="">All Sources</option>
+            {allSources.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}
+            className="px-3 py-2 border border-slate-300 rounded-lg text-sm">
+            <option value="">All Locations</option>
+            {allLocations.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
         </div>
         <p className="text-xs text-slate-500 mt-2">Showing {filtered.length} of {profiles.length}</p>
@@ -158,16 +187,12 @@ export default function ProfilesPage() {
                 <tr key={p.id} className="border-b border-slate-100 hover:bg-slate-50">
                   <td className="px-4 py-3">
                     <div>
-                      <span className="font-medium text-slate-800">
+                      <Link href={`/candidate/${p.id}`} className="font-medium text-indigo-600 hover:underline">
                         {p.firstName} {p.lastName}
-                      </span>
+                      </Link>
                       {p.profileUrl && (
-                        <a
-                          href={p.profileUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="block text-xs text-indigo-500 hover:underline truncate max-w-[200px]"
-                        >
+                        <a href={p.profileUrl} target="_blank" rel="noopener noreferrer"
+                          className="block text-xs text-slate-400 hover:text-indigo-500 truncate max-w-[200px]">
                           LinkedIn
                         </a>
                       )}

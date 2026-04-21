@@ -1,5 +1,5 @@
 import * as db from "@/lib/db";
-import { addLinkedInSearch, updatePersona } from "@/lib/google-sheets";
+import { addLinkedInSearch, clearLinkedInSearches, updatePersona } from "@/lib/google-sheets";
 
 // ============================================================
 // Standard Persona Parameter Registry
@@ -42,7 +42,7 @@ export interface SuggestionQuestion { id: string; text: string; options: Suggest
 export interface PersonaParam { key: string; value: string; }
 export interface StructuredPersona { id: string; name: string; priority: number; params: PersonaParam[]; nonNegotiable: string; description: string; }
 export interface LinkedInSearchString { personaId: string; personaName: string; primary: string; alternate?: string; }
-export interface EvalMatrixEntry { round: string; skillArea: string; objective: string; questions: string; goodAnswer: string; badAnswer: string; }
+export interface EvalMatrixEntry { roundKey: string; round: string; skillArea: string; objective: string; questions: string; goodAnswer: string; badAnswer: string; }
 
 export type PositionFields = Record<string, string>;
 
@@ -129,9 +129,9 @@ const JD_SYSTEM = `You are a position-creation assistant. Your ONLY job is to he
 **Other:** redFlags, idealProfile
 
 ## Workflow
-1. If transcript provided → extract ALL fields you can, output them, then ask about remaining gaps
-2. Ask 2-3 unfilled fields at a time with suggested answers
-3. When the TA answers, update fields and move to the next gap
+1. If transcript provided → extract ALL fields you can, output a fields block, then IMMEDIATELY ask about 2-3 unfilled fields with a suggestions block in the SAME response
+2. EVERY response MUST end with a suggestions block asking about unfilled fields — NEVER leave the user without a next question
+3. When the TA answers, update fields and ask about the next 2-3 gaps
 4. When all critical fields are filled, say "JD complete" and stop
 
 ## Output Formats
@@ -200,29 +200,42 @@ Optional params (ONLY if TA explicitly requests): ${OPTIONAL_PERSONA_PARAMS.map(
 ## Style
 - 1-2 sentences max. No preamble. Just ask or output.`;
 
-const LINKEDIN_SYSTEM = `Your ONLY job is to generate LinkedIn boolean search strings for each persona. No commentary, no suggestions, no advice.
+const LINKEDIN_SYSTEM = `Generate EXACTLY ONE LinkedIn boolean search string per persona. No commentary. No alternates.
 
 Rules:
-- Use proper boolean: AND, OR, NOT, quotes, parentheses
-- 1-2 strings per persona (primary + optional alternate)
-- Base strings on designation, industry terms, and key requirements from the persona
-- Output ONLY the linkedin_strings block, nothing else
+- Proper boolean: AND, OR, NOT, quotes, parentheses
+- EXACTLY one string per persona — no more, no less, no alternates
+- Output ONLY the linkedin_strings block
 
 \`\`\`linkedin_strings
-[{"personaId":"persona-1","personaName":"Name","primary":"(\"title1\" OR \"title2\") AND \"SaaS\"","alternate":"..."}]
+[{"personaId":"persona-1","personaName":"Name","primary":"(\"title1\" OR \"title2\") AND \"SaaS\""}]
 \`\`\``;
 
 const TRANSCRIPT_SUMMARY_SYSTEM = `Summarize this kickoff call transcript into a factual summary (300-500 words). Include ONLY what was discussed: role context, requirements, team structure, red flags, timeline, compensation signals, target companies. No opinions or recommendations.`;
 
-const EVAL_MATRIX_SYSTEM = `Your ONLY job is to generate an interview evaluation matrix from the JD. No advice, no commentary.
+const EVAL_MATRIX_SYSTEM = `Your ONLY job is to generate evaluation criteria for interview rounds. No advice, no commentary.
 
-Rules:
-- 3-4 interview rounds, 3-4 evaluation entries per round
-- Base entries on the must-have competencies, outcomes, and red flags from the JD
+You will be given the JD and a list of interview rounds with their keys. For EACH enabled round, generate 3-4 evaluation entries that guide the interviewer on what to assess.
+
+## Round Descriptions (what each round assesses)
+- rs (Recruiter Screen): Motivation, fit, logistics (notice period, comp expectations, location)
+- hm (Hiring Manager): Role-specific depth, team fit, leadership style, past outcomes
+- str (STR - Structured Thinking Round): Problem-solving via puzzles/brainteasers — tests logical reasoning, structured approach, ability to think under pressure
+- assignment (Assignment / Case Study): Hands-on work quality, how they approach real problems
+- domain (Domain / Technical): Technical depth, domain expertise, hard skills
+- who (WHO - Culture Fit): Values alignment, collaboration style, how they handle conflict
+- lta (LTA - Leadership Team Alignment): Strategic thinking, exec presence, org-level fit
+- ref (Reference Checks): Verification questions for references
+
+## Rules
+- Each entry has: roundKey (must match provided key), skillArea, objective (why testing this), questions (1-2 to ask), goodAnswer (what strong looks like), badAnswer (what weak looks like)
+- Tailor entries to what that specific round ACTUALLY assesses per the descriptions above
+- For STR: generate puzzle-type questions that test structured thinking — logic puzzles, estimation problems, framework application
+- Base everything on the JD's competencies, outcomes, and red flags
 - Output ONLY the eval_matrix block
 
 \`\`\`eval_matrix
-[{"round":"Recruiter Screen","skillArea":"Motivation","objective":"Assess interest","questions":"Why this role?","goodAnswer":"Specific, references mission","badAnswer":"Generic, only about comp"}]
+[{"roundKey":"rs","skillArea":"Motivation","objective":"Assess genuine interest","questions":"Why this role?","goodAnswer":"Specific, references mission","badAnswer":"Generic, only about comp"}]
 \`\`\``;
 
 // ============================================================
@@ -335,23 +348,45 @@ export async function startPersonaWorkshop(sessionId: string) {
   const jdContext = buildJdContext(fields);
   const summaryCtx = meta.transcriptSummary ? `\n\nKickoff Summary:\n${meta.transcriptSummary}` : "";
 
-  const userMsg = `JD for persona building:\n${jdContext}${summaryCtx}`;
+  const userMsg = `JD for persona building. Identify relevant params and generate personas:\n${jdContext}${summaryCtx}`;
   const messages: db.ChatMessage[] = [{ role: "user", content: userMsg }];
   const assistantMsg = await callLLM(PERSONA_SYSTEM, messages);
   messages.push({ role: "assistant", content: assistantMsg });
+
+  let activeParams = extractActiveParams(assistantMsg);
+  if (activeParams.length > 0) db.updateSessionMeta(sessionId, { activeParams });
+  let suggestions = extractSuggestions(assistantMsg);
+  let personas = extractPersonas(assistantMsg);
+  let displayMsg = cleanMessageForDisplay(assistantMsg);
+
+  // If first response only identified params / asked questions but didn't generate personas,
+  // send a follow-up to actually generate them
+  if (personas.length === 0) {
+    const followUp = "Now generate the personas based on the JD. Use the default params you identified. Output the personas block.";
+    messages.push({ role: "user", content: followUp });
+    const followUpReply = await callLLM(PERSONA_SYSTEM, messages);
+    messages.push({ role: "assistant", content: followUpReply });
+
+    const followUpPersonas = extractPersonas(followUpReply);
+    const followUpParams = extractActiveParams(followUpReply);
+    const followUpSuggestions = extractSuggestions(followUpReply);
+    const followUpDisplay = cleanMessageForDisplay(followUpReply);
+
+    if (followUpParams.length > 0) { activeParams = followUpParams; db.updateSessionMeta(sessionId, { activeParams }); }
+    if (followUpPersonas.length > 0) personas = followUpPersonas;
+    if (followUpSuggestions.length > 0) suggestions = followUpSuggestions;
+    if (followUpDisplay) displayMsg = displayMsg ? `${displayMsg}\n\n${followUpDisplay}` : followUpDisplay;
+  }
+
   db.saveMessages(sessionId, "persona", messages);
 
-  const activeParams = extractActiveParams(assistantMsg);
-  if (activeParams.length > 0) db.updateSessionMeta(sessionId, { activeParams });
-  const suggestions = extractSuggestions(assistantMsg);
-  const personas = extractPersonas(assistantMsg);
   if (personas.length > 0) {
     db.savePersonas(sessionId, personas.map(structuredToDbPersona.bind(null, sessionId)));
     db.updateSessionMeta(sessionId, { personaPhase: "complete" });
   }
 
-  let displayMsg = cleanMessageForDisplay(assistantMsg);
   if (personas.length > 0 && !displayMsg) displayMsg = `${personas.length} personas created. Edit params or reorder on the left. Chat here to refine.`;
+  if (!displayMsg) displayMsg = "Analyzing JD for personas. Answer any questions above to proceed.";
 
   return { message: displayMsg, suggestions, activeParams, personas };
 }
@@ -411,14 +446,17 @@ export async function generateLinkedInStrings(sessionId: string) {
   const fields = db.getJdFields(sessionId);
   const personas = db.getPersonas(sessionId).map(dbPersonaToStructured);
 
-  const userMsg = `Generate LinkedIn search strings.\n\nJD:\n${buildJdContext(fields)}\n\nPersonas:\n${buildPersonaSummary(personas)}`;
+  const userMsg = `Generate exactly ${personas.length} search strings, one per persona.\n\nJD:\n${buildJdContext(fields)}\n\nPersonas:\n${buildPersonaSummary(personas)}`;
   const assistantMsg = await callLLM(LINKEDIN_SYSTEM, [{ role: "user", content: userMsg }], 2048);
   const strings = extractLinkedInStrings(assistantMsg);
 
+  // Clear existing searches before writing new ones
+  await clearLinkedInSearches();
+
   for (const s of strings) {
     try {
-      await addLinkedInSearch({ persona: s.personaName, searchString: s.primary, searchUrl: "", pipelineUrl: "", results: 0, dateCreated: new Date().toISOString().split("T")[0] });
-      if (s.alternate) await addLinkedInSearch({ persona: `${s.personaName} (alt)`, searchString: s.alternate, searchUrl: "", pipelineUrl: "", results: 0, dateCreated: new Date().toISOString().split("T")[0] });
+      const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(s.primary)}&origin=GLOBAL_SEARCH_HEADER`;
+      await addLinkedInSearch({ persona: s.personaName, searchString: s.primary, searchUrl, pipelineUrl: "", results: 0, dateCreated: new Date().toISOString().split("T")[0] });
     } catch {}
   }
   return { strings };
@@ -434,12 +472,81 @@ export async function generateEvalMatrix(sessionId: string) {
   const jdContext = buildJdContext(fields);
   const summaryCtx = meta.transcriptSummary ? `\n\nKickoff Summary:\n${meta.transcriptSummary}` : "";
 
-  const jdMessages = db.getMessages(sessionId, "jd");
-  const recentChat = trimMessages(jdMessages, 5).filter((m) => m.role === "assistant").map((m) => m.content).join("\n---\n");
+  // Get enabled rounds
+  const rounds = db.getRounds(sessionId).filter((r) => r.enabled);
+  const roundsList = rounds.map((r) => `- ${r.roundKey}: ${r.roundName}`).join("\n");
 
-  const userMsg = `Generate evaluation matrix.\n\nJD:\n${jdContext}${summaryCtx}${recentChat ? `\n\nJD discussion:\n${recentChat}` : ""}`;
-  const assistantMsg = await callLLM(EVAL_MATRIX_SYSTEM, [{ role: "user", content: userMsg }], 3000);
-  return { entries: extractEvalMatrix(assistantMsg) };
+  const userMsg = `Generate evaluation criteria for these interview rounds:\n${roundsList}\n\nJD:\n${jdContext}${summaryCtx}`;
+  const assistantMsg = await callLLM(EVAL_MATRIX_SYSTEM, [{ role: "user", content: userMsg }], 4096);
+  const entries = extractEvalMatrix(assistantMsg);
+
+  // Save to DB
+  if (entries.length > 0) {
+    db.saveAllEvalEntries(sessionId, entries.map((e, i) => ({
+      roundKey: e.roundKey || e.round || "",
+      skillArea: e.skillArea,
+      objective: e.objective,
+      questions: e.questions,
+      goodAnswer: e.goodAnswer,
+      badAnswer: e.badAnswer,
+      sortOrder: i,
+    })));
+  }
+
+  return { entries, rounds };
+}
+
+// ============================================================
+// Interview Transcript Analysis
+// ============================================================
+
+export async function analyzeInterviewTranscript(
+  sessionId: string,
+  candidateId: string,
+  roundKey: string,
+  transcript: string
+): Promise<{ analysis: string; rating: number; summary: string }> {
+  const fields = db.getJdFields(sessionId);
+  const jdContext = buildJdContext(fields);
+  const evalEntries = db.getEvalEntries(sessionId, roundKey);
+  const rounds = db.getRounds(sessionId);
+  const round = rounds.find((r) => r.roundKey === roundKey);
+  const roundName = round?.roundName || roundKey;
+
+  const evalContext = evalEntries.length > 0
+    ? evalEntries.map((e) => `- ${e.skillArea}: ${e.objective}\n  Q: ${e.questions}\n  Good: ${e.goodAnswer}\n  Bad: ${e.badAnswer}`).join("\n")
+    : "(No evaluation criteria defined for this round)";
+
+  const systemPrompt = `You are analyzing an interview transcript for the "${roundName}" round. Rate the candidate 1-4 based on the evaluation criteria.
+
+Scoring: 1=Strong No-Go, 2=No Go, 3=Go, 4=Strong Go
+
+JD Context:
+${jdContext}
+
+Evaluation Criteria for ${roundName}:
+${evalContext}
+
+Output format — STRICTLY follow this JSON:
+\`\`\`analysis
+{"rating": 3, "summary": "One sentence verdict", "strengths": ["point 1", "point 2"], "concerns": ["point 1"], "detailed": "2-3 paragraph analysis referencing specific answers from the transcript against each evaluation criterion"}
+\`\`\``;
+
+  const assistantMsg = await callLLM(systemPrompt, [{ role: "user", content: `Interview transcript:\n\n${transcript}` }], 2048);
+
+  const match = assistantMsg.match(/```analysis\s*\n?([\s\S]*?)\n?```/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      return {
+        rating: parsed.rating || 0,
+        summary: parsed.summary || "",
+        analysis: JSON.stringify(parsed),
+      };
+    } catch {}
+  }
+
+  return { rating: 0, summary: "Analysis failed to parse", analysis: assistantMsg };
 }
 
 // ============================================================
@@ -552,7 +659,15 @@ function extractEvalMatrix(text: string): EvalMatrixEntry[] {
   try {
     const p = JSON.parse(m[1]);
     if (!Array.isArray(p)) return [];
-    return p.map((e: any) => ({ round: e.round || "", skillArea: e.skillArea || "", objective: e.objective || "", questions: e.questions || "", goodAnswer: e.goodAnswer || "", badAnswer: e.badAnswer || "" }));
+    return p.map((e: any) => ({
+      roundKey: e.roundKey || e.round_key || e.round || "",
+      round: e.round || e.roundKey || "",
+      skillArea: e.skillArea || e.skill_area || "",
+      objective: e.objective || "",
+      questions: e.questions || "",
+      goodAnswer: e.goodAnswer || e.good_answer || "",
+      badAnswer: e.badAnswer || e.bad_answer || "",
+    }));
   } catch { return []; }
 }
 

@@ -57,6 +57,76 @@ function migrate(db: Database.Database): void {
       FOREIGN KEY (session_id) REFERENCES madilyn_sessions(session_id)
     );
 
+    CREATE TABLE IF NOT EXISTS interview_rounds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      round_key TEXT NOT NULL,
+      round_name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(session_id, round_key),
+      FOREIGN KEY (session_id) REFERENCES madilyn_sessions(session_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS eval_matrix_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      round_key TEXT NOT NULL,
+      skill_area TEXT NOT NULL DEFAULT '',
+      objective TEXT NOT NULL DEFAULT '',
+      questions TEXT NOT NULL DEFAULT '',
+      good_answer TEXT NOT NULL DEFAULT '',
+      bad_answer TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (session_id) REFERENCES madilyn_sessions(session_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS candidates (
+      id TEXT PRIMARY KEY,
+      first_name TEXT NOT NULL DEFAULT '',
+      last_name TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      linkedin_url TEXT NOT NULL DEFAULT '',
+      headline TEXT NOT NULL DEFAULT '',
+      location TEXT NOT NULL DEFAULT '',
+      current_title TEXT NOT NULL DEFAULT '',
+      current_company TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      persona TEXT NOT NULL DEFAULT '',
+      role_relevance TEXT NOT NULL DEFAULT '',
+      current_status TEXT NOT NULL DEFAULT 'Sourced',
+      current_stage TEXT NOT NULL DEFAULT '',
+      dq_reason TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS stage_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      status TEXT NOT NULL,
+      interviewer TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      rating TEXT NOT NULL DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (candidate_id) REFERENCES candidates(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS interview_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id TEXT NOT NULL,
+      round_key TEXT NOT NULL,
+      transcript TEXT NOT NULL DEFAULT '',
+      analysis TEXT NOT NULL DEFAULT '',
+      rating INTEGER NOT NULL DEFAULT 0,
+      interviewer TEXT NOT NULL DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (candidate_id) REFERENCES candidates(id)
+    );
+
     CREATE TABLE IF NOT EXISTS session_meta (
       session_id TEXT PRIMARY KEY,
       transcript TEXT NOT NULL DEFAULT '',
@@ -255,8 +325,299 @@ export function updatePersonaParam(sessionId: string, personaId: string, key: st
 // Reset
 // ============================================================
 
+// ============================================================
+// Interview Rounds
+// ============================================================
+
+export const DEFAULT_ROUNDS = [
+  { key: "rs", name: "Recruiter Screen" },
+  { key: "hm", name: "Hiring Manager" },
+  { key: "str", name: "STR (Structured Thinking Round)" },
+  { key: "assignment", name: "Assignment / Case Study" },
+  { key: "domain", name: "Domain / Technical" },
+  { key: "who", name: "WHO (Culture Fit)" },
+  { key: "lta", name: "LTA (Leadership Team Alignment)" },
+  { key: "ref", name: "Reference Checks" },
+];
+
+export interface InterviewRound {
+  roundKey: string;
+  roundName: string;
+  sortOrder: number;
+  enabled: boolean;
+}
+
+export function getRounds(sessionId: string): InterviewRound[] {
+  const db = getDb();
+  ensureSession(sessionId);
+  const rows = db.prepare(`SELECT * FROM interview_rounds WHERE session_id = ? ORDER BY sort_order ASC`).all(sessionId) as any[];
+  if (rows.length === 0) {
+    // Initialize with defaults
+    initDefaultRounds(sessionId);
+    return DEFAULT_ROUNDS.map((r, i) => ({ roundKey: r.key, roundName: r.name, sortOrder: i, enabled: true }));
+  }
+  return rows.map((r) => ({ roundKey: r.round_key, roundName: r.round_name, sortOrder: r.sort_order, enabled: !!r.enabled }));
+}
+
+function initDefaultRounds(sessionId: string): void {
+  const db = getDb();
+  const ins = db.prepare(`INSERT OR IGNORE INTO interview_rounds (session_id, round_key, round_name, sort_order, enabled) VALUES (?, ?, ?, ?, 1)`);
+  const tx = db.transaction(() => {
+    DEFAULT_ROUNDS.forEach((r, i) => ins.run(sessionId, r.key, r.name, i));
+  });
+  tx();
+}
+
+export function saveRounds(sessionId: string, rounds: InterviewRound[]): void {
+  const db = getDb();
+  ensureSession(sessionId);
+  db.prepare(`DELETE FROM interview_rounds WHERE session_id = ?`).run(sessionId);
+  const ins = db.prepare(`INSERT INTO interview_rounds (session_id, round_key, round_name, sort_order, enabled) VALUES (?, ?, ?, ?, ?)`);
+  const tx = db.transaction(() => {
+    rounds.forEach((r) => ins.run(sessionId, r.roundKey, r.roundName, r.sortOrder, r.enabled ? 1 : 0));
+  });
+  tx();
+}
+
+// ============================================================
+// Eval Matrix Entries
+// ============================================================
+
+export interface EvalEntry {
+  id: number;
+  roundKey: string;
+  skillArea: string;
+  objective: string;
+  questions: string;
+  goodAnswer: string;
+  badAnswer: string;
+  sortOrder: number;
+}
+
+export function getEvalEntries(sessionId: string, roundKey?: string): EvalEntry[] {
+  const db = getDb();
+  ensureSession(sessionId);
+  const sql = roundKey
+    ? `SELECT * FROM eval_matrix_entries WHERE session_id = ? AND round_key = ? ORDER BY sort_order ASC`
+    : `SELECT * FROM eval_matrix_entries WHERE session_id = ? ORDER BY round_key, sort_order ASC`;
+  const rows = (roundKey ? db.prepare(sql).all(sessionId, roundKey) : db.prepare(sql).all(sessionId)) as any[];
+  return rows.map((r) => ({
+    id: r.id, roundKey: r.round_key, skillArea: r.skill_area, objective: r.objective,
+    questions: r.questions, goodAnswer: r.good_answer, badAnswer: r.bad_answer, sortOrder: r.sort_order,
+  }));
+}
+
+export function saveEvalEntries(sessionId: string, roundKey: string, entries: Omit<EvalEntry, "id">[]): void {
+  const db = getDb();
+  ensureSession(sessionId);
+  db.prepare(`DELETE FROM eval_matrix_entries WHERE session_id = ? AND round_key = ?`).run(sessionId, roundKey);
+  const ins = db.prepare(`INSERT INTO eval_matrix_entries (session_id, round_key, skill_area, objective, questions, good_answer, bad_answer, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const tx = db.transaction(() => {
+    entries.forEach((e, i) => ins.run(sessionId, roundKey, e.skillArea, e.objective, e.questions, e.goodAnswer, e.badAnswer, i));
+  });
+  tx();
+}
+
+export function saveAllEvalEntries(sessionId: string, entries: Omit<EvalEntry, "id">[]): void {
+  const db = getDb();
+  ensureSession(sessionId);
+  db.prepare(`DELETE FROM eval_matrix_entries WHERE session_id = ?`).run(sessionId);
+  const ins = db.prepare(`INSERT INTO eval_matrix_entries (session_id, round_key, skill_area, objective, questions, good_answer, bad_answer, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const tx = db.transaction(() => {
+    entries.forEach((e, i) => ins.run(sessionId, e.roundKey, e.skillArea, e.objective, e.questions, e.goodAnswer, e.badAnswer, e.sortOrder));
+  });
+  tx();
+}
+
+export function updateEvalEntry(id: number, updates: Partial<Omit<EvalEntry, "id">>): void {
+  const db = getDb();
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (updates.skillArea !== undefined) { sets.push("skill_area = ?"); vals.push(updates.skillArea); }
+  if (updates.objective !== undefined) { sets.push("objective = ?"); vals.push(updates.objective); }
+  if (updates.questions !== undefined) { sets.push("questions = ?"); vals.push(updates.questions); }
+  if (updates.goodAnswer !== undefined) { sets.push("good_answer = ?"); vals.push(updates.goodAnswer); }
+  if (updates.badAnswer !== undefined) { sets.push("bad_answer = ?"); vals.push(updates.badAnswer); }
+  if (sets.length === 0) return;
+  vals.push(id);
+  db.prepare(`UPDATE eval_matrix_entries SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+export function deleteEvalEntry(id: number): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM eval_matrix_entries WHERE id = ?`).run(id);
+}
+
+// ============================================================
+// Candidates (hybrid — stored in DB, synced to Sheets)
+// ============================================================
+
+export interface CandidateRecord {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  linkedinUrl: string;
+  headline: string;
+  location: string;
+  currentTitle: string;
+  currentCompany: string;
+  source: string;
+  persona: string;
+  roleRelevance: string;
+  currentStatus: string;
+  currentStage: string;
+  dqReason: string;
+  notes: string;
+  createdAt: string;
+}
+
+export function getCandidate(id: string): CandidateRecord | null {
+  const db = getDb();
+  const row = db.prepare(`SELECT * FROM candidates WHERE id = ?`).get(id) as any;
+  if (!row) return null;
+  return mapCandidateRow(row);
+}
+
+export function getCandidates(filters?: { status?: string; stage?: string; persona?: string; search?: string; relevance?: string; location?: string }): CandidateRecord[] {
+  const db = getDb();
+  let sql = `SELECT * FROM candidates WHERE 1=1`;
+  const params: any[] = [];
+
+  if (filters?.status) { sql += ` AND current_status = ?`; params.push(filters.status); }
+  if (filters?.stage) { sql += ` AND current_stage = ?`; params.push(filters.stage); }
+  if (filters?.persona) { sql += ` AND persona = ?`; params.push(filters.persona); }
+  if (filters?.relevance) { sql += ` AND role_relevance = ?`; params.push(filters.relevance); }
+  if (filters?.location) { sql += ` AND location LIKE ?`; params.push(`%${filters.location}%`); }
+  if (filters?.search) {
+    sql += ` AND (first_name LIKE ? OR last_name LIKE ? OR email LIKE ? OR current_company LIKE ? OR headline LIKE ?)`;
+    const s = `%${filters.search}%`;
+    params.push(s, s, s, s, s);
+  }
+
+  sql += ` ORDER BY updated_at DESC`;
+  const rows = db.prepare(sql).all(...params) as any[];
+  return rows.map(mapCandidateRow);
+}
+
+export function upsertCandidate(c: Partial<CandidateRecord> & { id: string }): void {
+  const db = getDb();
+  const existing = db.prepare(`SELECT id FROM candidates WHERE id = ?`).get(c.id);
+  if (existing) {
+    const sets: string[] = [];
+    const vals: any[] = [];
+    const fields: [string, keyof CandidateRecord][] = [
+      ["first_name", "firstName"], ["last_name", "lastName"], ["email", "email"], ["phone", "phone"],
+      ["linkedin_url", "linkedinUrl"], ["headline", "headline"], ["location", "location"],
+      ["current_title", "currentTitle"], ["current_company", "currentCompany"], ["source", "source"],
+      ["persona", "persona"], ["role_relevance", "roleRelevance"], ["current_status", "currentStatus"],
+      ["current_stage", "currentStage"], ["dq_reason", "dqReason"], ["notes", "notes"],
+    ];
+    for (const [col, key] of fields) {
+      if (c[key] !== undefined) { sets.push(`${col} = ?`); vals.push(c[key]); }
+    }
+    if (sets.length === 0) return;
+    sets.push("updated_at = datetime('now')");
+    vals.push(c.id);
+    db.prepare(`UPDATE candidates SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  } else {
+    db.prepare(`INSERT INTO candidates (id, first_name, last_name, email, phone, linkedin_url, headline, location, current_title, current_company, source, persona, role_relevance, current_status, current_stage, dq_reason, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(c.id, c.firstName || "", c.lastName || "", c.email || "", c.phone || "", c.linkedinUrl || "", c.headline || "", c.location || "", c.currentTitle || "", c.currentCompany || "", c.source || "", c.persona || "", c.roleRelevance || "", c.currentStatus || "Sourced", c.currentStage || "", c.dqReason || "", c.notes || "");
+  }
+}
+
+export function updateCandidateStatus(id: string, status: string, stage?: string, dqReason?: string): void {
+  const db = getDb();
+  const sets = ["current_status = ?", "updated_at = datetime('now')"];
+  const vals: any[] = [status];
+  if (stage !== undefined) { sets.push("current_stage = ?"); vals.push(stage); }
+  if (dqReason !== undefined) { sets.push("dq_reason = ?"); vals.push(dqReason); }
+  vals.push(id);
+  db.prepare(`UPDATE candidates SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+function mapCandidateRow(r: any): CandidateRecord {
+  return {
+    id: r.id, firstName: r.first_name, lastName: r.last_name, email: r.email, phone: r.phone,
+    linkedinUrl: r.linkedin_url, headline: r.headline, location: r.location,
+    currentTitle: r.current_title, currentCompany: r.current_company, source: r.source,
+    persona: r.persona, roleRelevance: r.role_relevance, currentStatus: r.current_status,
+    currentStage: r.current_stage, dqReason: r.dq_reason, notes: r.notes, createdAt: r.created_at,
+  };
+}
+
+// ============================================================
+// Stage History
+// ============================================================
+
+export interface StageHistoryEntry {
+  id: number;
+  candidateId: string;
+  stage: string;
+  status: string;
+  interviewer: string;
+  notes: string;
+  rating: string;
+  createdAt: string;
+}
+
+export function getStageHistory(candidateId: string): StageHistoryEntry[] {
+  const db = getDb();
+  const rows = db.prepare(`SELECT * FROM stage_history WHERE candidate_id = ? ORDER BY created_at ASC`).all(candidateId) as any[];
+  return rows.map((r) => ({
+    id: r.id, candidateId: r.candidate_id, stage: r.stage, status: r.status,
+    interviewer: r.interviewer, notes: r.notes, rating: r.rating, createdAt: r.created_at,
+  }));
+}
+
+export function addStageHistory(candidateId: string, stage: string, status: string, interviewer?: string, notes?: string, rating?: string): void {
+  const db = getDb();
+  db.prepare(`INSERT INTO stage_history (candidate_id, stage, status, interviewer, notes, rating) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(candidateId, stage, status, interviewer || "", notes || "", rating || "");
+}
+
+// ============================================================
+// Interview Feedback (per round transcript + LLM analysis)
+// ============================================================
+
+export interface InterviewFeedbackEntry {
+  id: number;
+  candidateId: string;
+  roundKey: string;
+  transcript: string;
+  analysis: string;
+  rating: number;
+  interviewer: string;
+  createdAt: string;
+}
+
+export function getInterviewFeedback(candidateId: string, roundKey?: string): InterviewFeedbackEntry[] {
+  const db = getDb();
+  const sql = roundKey
+    ? `SELECT * FROM interview_feedback WHERE candidate_id = ? AND round_key = ? ORDER BY created_at DESC`
+    : `SELECT * FROM interview_feedback WHERE candidate_id = ? ORDER BY created_at DESC`;
+  const rows = (roundKey ? db.prepare(sql).all(candidateId, roundKey) : db.prepare(sql).all(candidateId)) as any[];
+  return rows.map((r) => ({
+    id: r.id, candidateId: r.candidate_id, roundKey: r.round_key, transcript: r.transcript,
+    analysis: r.analysis, rating: r.rating, interviewer: r.interviewer, createdAt: r.created_at,
+  }));
+}
+
+export function saveInterviewFeedback(candidateId: string, roundKey: string, transcript: string, analysis: string, rating: number, interviewer: string): void {
+  const db = getDb();
+  db.prepare(`INSERT INTO interview_feedback (candidate_id, round_key, transcript, analysis, rating, interviewer) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(candidateId, roundKey, transcript, analysis, rating, interviewer);
+}
+
+// ============================================================
+// Reset
+// ============================================================
+
 export function resetSession(sessionId: string): void {
   const db = getDb();
+  db.prepare(`DELETE FROM eval_matrix_entries WHERE session_id = ?`).run(sessionId);
+  db.prepare(`DELETE FROM interview_rounds WHERE session_id = ?`).run(sessionId);
   db.prepare(`DELETE FROM chat_contexts WHERE session_id = ?`).run(sessionId);
   db.prepare(`DELETE FROM personas WHERE session_id = ?`).run(sessionId);
   db.prepare(`DELETE FROM jd_fields WHERE session_id = ?`).run(sessionId);
@@ -266,5 +627,5 @@ export function resetSession(sessionId: string): void {
 
 export function resetAll(): void {
   const db = getDb();
-  db.exec(`DELETE FROM chat_contexts; DELETE FROM personas; DELETE FROM jd_fields; DELETE FROM session_meta; DELETE FROM madilyn_sessions;`);
+  db.exec(`DELETE FROM interview_feedback; DELETE FROM stage_history; DELETE FROM candidates; DELETE FROM eval_matrix_entries; DELETE FROM interview_rounds; DELETE FROM chat_contexts; DELETE FROM personas; DELETE FROM jd_fields; DELETE FROM session_meta; DELETE FROM madilyn_sessions;`);
 }

@@ -9,6 +9,7 @@ export async function GET() {
       ...config,
       hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
       awsRegion: process.env.AWS_REGION || "us-east-1",
+      hasLinkedinCookie: !!process.env.LINKEDIN_LI_AT,
     });
   } catch (error) {
     return Response.json({ error: "Failed to load config" }, { status: 500 });
@@ -18,11 +19,23 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { sheetUrl, credentialsPath, bedrockToken, awsRegion } = body;
+    const { sheetUrl, credentialsPath, bedrockToken, awsRegion, linkedinCookie } = body;
 
-    // Save Bedrock credentials to process env (persists for this server session)
+    // Save credentials to process env (persists for this server session)
     if (bedrockToken) process.env.AWS_BEARER_TOKEN_BEDROCK = bedrockToken;
     if (awsRegion) process.env.AWS_REGION = awsRegion;
+    if (linkedinCookie) process.env.LINKEDIN_LI_AT = linkedinCookie;
+
+    // If only updating env vars (no sheet URL), return early
+    if (!sheetUrl) {
+      const existing = loadConfig();
+      return Response.json({
+        ...existing,
+        hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
+        hasLinkedinCookie: !!process.env.LINKEDIN_LI_AT,
+        success: true,
+      });
+    }
 
     const sheetId = extractSheetId(sheetUrl || "");
     if (!sheetId) {

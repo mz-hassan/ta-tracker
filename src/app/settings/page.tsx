@@ -20,6 +20,7 @@ export default function SettingsPage() {
   const [credentialsPath, setCredentialsPath] = useState("");
   const [bedrockToken, setBedrockToken] = useState("");
   const [awsRegion, setAwsRegion] = useState("us-east-1");
+  const [linkedinCookie, setLinkedinCookie] = useState("");
   const [message, setMessage] = useState<{
     type: "success" | "error" | "warning";
     text: string;
@@ -44,7 +45,7 @@ export default function SettingsPage() {
       const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheetUrl, credentialsPath, bedrockToken, awsRegion }),
+        body: JSON.stringify({ sheetUrl, credentialsPath, bedrockToken, awsRegion, linkedinCookie }),
       });
       const data = await res.json();
 
@@ -165,9 +166,9 @@ export default function SettingsPage() {
           </p>
         </div>
 
-        {/* AWS Bedrock (Madilyn AI) */}
+        {/* AWS Bedrock (Marlyn AI) */}
         <div className="space-y-3 pt-4 border-t border-slate-200">
-          <h2 className="text-lg font-semibold text-slate-800">Madilyn (AI via AWS Bedrock)</h2>
+          <h2 className="text-lg font-semibold text-slate-800">Marlyn (AI via AWS Bedrock)</h2>
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-slate-700">
               Bedrock Bearer Token
@@ -193,8 +194,34 @@ export default function SettingsPage() {
             />
           </div>
           <p className="text-xs text-slate-500">
-            Required for Madilyn AI assistant. Uses Claude Sonnet via Amazon Bedrock.
+            Required for Marlyn AI assistant. Uses Claude Sonnet via Amazon Bedrock.
           </p>
+        </div>
+
+        {/* LinkedIn Cookie */}
+        <div className="space-y-3 pt-4 border-t border-slate-200">
+          <h2 className="text-lg font-semibold text-slate-800">LinkedIn (Search Scraper)</h2>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-slate-700">
+              li_at Cookie
+            </label>
+            <input
+              type="password"
+              value={linkedinCookie}
+              onChange={(e) => setLinkedinCookie(e.target.value)}
+              placeholder="AQEDAx..."
+              className="w-full px-4 py-3 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
+            />
+          </div>
+          <p className="text-xs text-slate-500">
+            Required for "Run Search" on LinkedIn Searches page. Get it from Chrome DevTools → Application → Cookies → linkedin.com → li_at.
+          </p>
+        </div>
+
+        {/* Google Calendar */}
+        <div className="space-y-3 pt-4 border-t border-slate-200">
+          <h2 className="text-lg font-semibold text-slate-800">Google Calendar (Interview Scheduling)</h2>
+          <CalendarConnect />
         </div>
 
         {/* Message */}
@@ -296,6 +323,100 @@ export default function SettingsPage() {
           Logging, 1.6 - Interview Template, 1.7 - Evaluation, Messages
         </div>
       </div>
+
+      {/* Danger Zone */}
+      <div className="bg-white rounded-xl shadow-sm border border-red-200 p-6">
+        <h2 className="text-lg font-semibold text-red-800 mb-2">Danger Zone</h2>
+        <p className="text-sm text-slate-500 mb-4">
+          Clear all data from the database and Google Sheets. This removes all candidates, personas, chat history, evaluation matrix, and resets everything to a blank slate. Headers are preserved.
+        </p>
+        <ResetButton />
+      </div>
     </div>
+  );
+}
+
+function CalendarConnect() {
+  const [status, setStatus] = useState<{ connected: boolean; authUrl?: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/google").then((r) => r.json()).then(setStatus);
+  }, []);
+
+  if (!status) return <p className="text-xs text-slate-400">Checking...</p>;
+
+  if (status.connected) {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="w-2 h-2 rounded-full bg-green-500" />
+        <span className="text-sm text-green-800">Google Calendar connected</span>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="text-sm text-slate-500 mb-3">
+        Connect your Google account to schedule interviews with Calendar invites and Google Meet links.
+      </p>
+      <a href={status.authUrl} className="inline-block px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+        Connect Google Calendar
+      </a>
+    </div>
+  );
+}
+
+function ResetButton() {
+  const [confirming, setConfirming] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      const res = await fetch("/api/reset", { method: "POST" });
+      const data = await res.json();
+      if (data.success) setDone(true);
+      else alert(`Reset failed: ${data.error}`);
+    } catch {
+      alert("Reset failed");
+    }
+    setResetting(false);
+    setConfirming(false);
+  };
+
+  if (done) {
+    return (
+      <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+        All data cleared. Refresh the page to start fresh.
+      </div>
+    );
+  }
+
+  if (confirming) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg space-y-3">
+        <p className="text-sm font-medium text-red-800">
+          Are you sure? This will permanently delete all data across the database and all Google Sheet tabs.
+        </p>
+        <div className="flex gap-2">
+          <button onClick={handleReset} disabled={resetting}
+            className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50">
+            {resetting ? "Resetting..." : "Yes, delete everything"}
+          </button>
+          <button onClick={() => setConfirming(false)}
+            className="px-4 py-2 bg-slate-200 text-slate-600 rounded-lg text-sm font-medium hover:bg-slate-300">
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <button onClick={() => setConfirming(true)}
+      className="px-4 py-2 bg-red-50 text-red-700 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-100">
+      Reset All Data
+    </button>
   );
 }

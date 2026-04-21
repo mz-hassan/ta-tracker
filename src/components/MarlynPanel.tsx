@@ -203,7 +203,7 @@ function SuggestionButtons({ suggestions, onSubmit, disabled }: {
 
 const PANEL_WIDTH = 380;
 
-export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mode: "jd" | "persona"; sessionId?: string; onOpenChange?: (open: boolean) => void }) {
+export function MarlynPanel({ mode, sessionId = "default", onOpenChange }: { mode: "jd" | "persona"; sessionId?: string; onOpenChange?: (open: boolean) => void }) {
   const [open, _setOpen] = useState(false);
   const setOpen = useCallback((v: boolean) => { _setOpen(v); onOpenChange?.(v); }, [onOpenChange]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -224,6 +224,8 @@ export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mo
           fetch(`/api/madilyn/state?sessionId=${sessionId}`)
             .then((r) => r.json())
             .then((d) => { if (d.greeting) setMessages([{ role: "assistant", content: d.greeting }]); });
+        } else if (mode === "persona") {
+          setMessages([{ role: "assistant", content: "I'll help build candidate personas. Click \"Generate Initial Personas\" on the left, or ask me directly to generate or refine personas." }]);
         } else {
           setMessages([]);
         }
@@ -235,31 +237,25 @@ export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mo
     if (open && loadedMode !== mode) loadHistory();
   }, [open, mode, loadedMode, loadHistory]);
 
-  // Listen for external events (e.g., transcript upload from position page)
+  // Listen for external events (transcript upload, persona workshop start)
   useEffect(() => {
-    const handler = (e: Event) => {
+    const handleTranscript = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.source === "transcript" && detail?.message) {
-        // Transcript was uploaded externally — add the result to chat
         setMessages((prev) => [
           ...prev,
-          { role: "user", content: "Uploaded kickoff call transcript." },
+          { role: "user" as const, content: "Uploaded kickoff call transcript." },
           {
-            role: "assistant",
+            role: "assistant" as const,
             content: detail.message,
             suggestions: detail.suggestions?.length > 0 ? detail.suggestions : undefined,
           },
         ]);
-        if (!open) setOpen(true);
+        setOpen(true);
       }
     };
-    window.addEventListener("madilyn-transcript", handler);
-    return () => window.removeEventListener("madilyn-transcript", handler);
-  }, [open]);
 
-  // Listen for persona workshop start (from "Generate Initial Personas" button)
-  useEffect(() => {
-    const handler = (e: Event) => {
+    const handlePersonaStart = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.message) {
         setMessages((prev) => [
@@ -270,15 +266,20 @@ export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mo
             suggestions: detail.suggestions?.length > 0 ? detail.suggestions : undefined,
           },
         ]);
-        if (!open) setOpen(true);
+        setOpen(true);
       }
       if (detail?.personas?.length > 0) {
-        window.dispatchEvent(new CustomEvent("madilyn-update", { detail }));
+        window.dispatchEvent(new CustomEvent("marlyn-update", { detail }));
       }
     };
-    window.addEventListener("madilyn-persona-start", handler);
-    return () => window.removeEventListener("madilyn-persona-start", handler);
-  }, [open, setOpen]);
+
+    window.addEventListener("marlyn-transcript", handleTranscript);
+    window.addEventListener("marlyn-persona-start", handlePersonaStart);
+    return () => {
+      window.removeEventListener("marlyn-transcript", handleTranscript);
+      window.removeEventListener("marlyn-persona-start", handlePersonaStart);
+    };
+  }, [setOpen]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -306,7 +307,7 @@ export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mo
           ...prev,
           { role: "assistant", content: data.message, suggestions: data.suggestions?.length > 0 ? data.suggestions : undefined },
         ]);
-        window.dispatchEvent(new CustomEvent("madilyn-update", { detail: data }));
+        window.dispatchEvent(new CustomEvent("marlyn-update", { detail: data }));
       }
     } catch {
       setMessages((prev) => [...prev, { role: "system", content: "Failed to send." }]);
@@ -344,7 +345,7 @@ export function MadilynPanel({ mode, sessionId = "default", onOpenChange }: { mo
         <div className="px-4 py-3 bg-white border-b border-slate-200 flex items-center gap-2.5 flex-shrink-0">
           <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-[10px]">M</div>
           <div className="flex-1">
-            <h2 className="font-semibold text-slate-800 text-sm">Madilyn</h2>
+            <h2 className="font-semibold text-slate-800 text-sm">Marlyn</h2>
             <p className="text-[10px] text-slate-400">{modeLabel}</p>
           </div>
           <button onClick={() => setOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded">

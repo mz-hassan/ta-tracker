@@ -3,9 +3,9 @@
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "./Sidebar";
-import { MadilynPanel } from "./MadilynPanel";
+import { MarlynPanel } from "./MarlynPanel";
 
-function getMadilynMode(pathname: string): "jd" | "persona" | null {
+function getMarlynMode(pathname: string): "jd" | "persona" | null {
   if (pathname.startsWith("/position") || pathname.startsWith("/opening")) return "jd";
   if (pathname.startsWith("/process")) return "persona";
   if (pathname.startsWith("/evaluation-matrix")) return "jd";
@@ -16,7 +16,7 @@ const PANEL_WIDTH = 380;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const mode = getMadilynMode(pathname);
+  const mode = getMarlynMode(pathname);
   const [panelOpen, setPanelOpen] = useState(false);
 
   const mainPaddingRight = mode && panelOpen ? PANEL_WIDTH : 0;
@@ -30,7 +30,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         {children}
       </main>
-      {mode && <MadilynPanel mode={mode} onOpenChange={setPanelOpen} />}
+      {mode && <MarlynPanel mode={mode} onOpenChange={setPanelOpen} />}
     </div>
   );
 }

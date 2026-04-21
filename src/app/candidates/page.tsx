@@ -91,7 +91,7 @@ export default function CandidatesPage() {
         {filtered.map((c) => (
           <a
             key={c.id}
-            href={`/candidates/${c.id}`}
+            href={`/candidate/${c.id}`}
             className="block bg-white rounded-xl shadow-sm border border-slate-200 p-5 hover:border-indigo-300 hover:shadow-md transition-all fade-in"
           >
             <div className="flex items-start justify-between">

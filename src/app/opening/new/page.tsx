@@ -839,7 +839,7 @@ export default function NewOpeningPage() {
               M
             </div>
             <div>
-              <h2 className="font-semibold text-slate-800">Madilyn</h2>
+              <h2 className="font-semibold text-slate-800">Marlyn</h2>
               <p className="text-xs text-slate-500">
                 {activeMode === "jd" ? "JD Builder" : "Persona Workshop"}
               </p>
@@ -964,7 +964,7 @@ export default function NewOpeningPage() {
               placeholder={
                 activeMode === "jd"
                   ? "Type a message about the JD..."
-                  : "Discuss persona priorities with Madilyn..."
+                  : "Discuss persona priorities with Marlyn..."
               }
               rows={1}
               className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent resize-none"

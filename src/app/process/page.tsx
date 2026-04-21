@@ -100,14 +100,14 @@ export default function ProcessPage() {
       .finally(() => setInitialLoading(false));
   }, []);
 
-  // Listen for persona updates from Madilyn panel
+  // Listen for persona updates from Marlyn panel
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.personas?.length > 0) setPersonas(detail.personas);
     };
-    window.addEventListener("madilyn-update", handler);
-    return () => window.removeEventListener("madilyn-update", handler);
+    window.addEventListener("marlyn-update", handler);
+    return () => window.removeEventListener("marlyn-update", handler);
   }, []);
 
   const handleStartWorkshop = async () => {
@@ -123,9 +123,9 @@ export default function ProcessPage() {
         setPersonas(data.personas);
       }
       // If the bot returned a message or suggestions (trade-off questions),
-      // push it into the Madilyn panel so the user sees it
+      // push it into the Marlyn panel so the user sees it
       if (data.message || data.suggestions?.length > 0) {
-        window.dispatchEvent(new CustomEvent("madilyn-persona-start", {
+        window.dispatchEvent(new CustomEvent("marlyn-persona-start", {
           detail: { message: data.message, suggestions: data.suggestions, personas: data.personas },
         }));
       }
@@ -197,7 +197,7 @@ export default function ProcessPage() {
       {jdReady && personas.length === 0 && (
         <div className="bg-indigo-50 rounded-xl border border-indigo-200 p-6 text-center">
           <p className="text-sm text-indigo-800 mb-3">Start the persona workshop to build structured candidate personas from the JD.</p>
-          <p className="text-xs text-indigo-600 mb-4">Use the Madilyn button (bottom-right) to discuss and refine personas interactively.</p>
+          <p className="text-xs text-indigo-600 mb-4">Use the Marlyn button (bottom-right) to discuss and refine personas interactively.</p>
           <button onClick={handleStartWorkshop} disabled={loading}
             className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
             {loading ? "Starting..." : "Generate Initial Personas"}
@@ -207,7 +207,7 @@ export default function ProcessPage() {
 
       {personas.length > 0 && (
         <>
-          <p className="text-xs text-slate-400">Drag to reorder. Click values to edit. Use Madilyn (bottom-right) to refine.</p>
+          <p className="text-xs text-slate-400">Drag to reorder. Click values to edit. Use Marlyn (bottom-right) to refine.</p>
           <div className="space-y-3">
             {personas.map((p, idx) => (
               <PersonaCard key={p.id} persona={p} onEditParam={handleEditParam}

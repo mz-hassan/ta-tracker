@@ -13,6 +13,7 @@ const navItems = [
   { label: "Inbound", href: "/inbound" },
   { label: "Shortlist", href: "/shortlist" },
   { label: "Interviews", href: "/interviews" },
+  { label: "Offers", href: "/offers" },
   { label: "Candidates", href: "/candidates" },
   { label: "Sheet Viewer", href: "/sheets" },
   { label: "Settings", href: "/settings" },

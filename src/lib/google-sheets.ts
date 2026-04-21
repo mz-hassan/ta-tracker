@@ -36,7 +36,7 @@ import type {
 let _sheets: sheets_v4.Sheets | null = null;
 let _sheetId: string = "";
 
-async function getSheets(): Promise<{ api: sheets_v4.Sheets; spreadsheetId: string }> {
+export async function getSheets(): Promise<{ api: sheets_v4.Sheets; spreadsheetId: string }> {
   const config = loadConfig();
   if (!config.configured || !config.sheetId) {
     throw new Error("Google Sheets not configured. Go to /settings to set up.");
@@ -117,13 +117,20 @@ function invalidateAll(): void {
   sheetCache.clear();
 }
 
-/** Clear all data rows from a tab (preserve header row) */
+/** Clear all data rows from a tab (preserve header row if it has defined headers) */
 async function clearDataRows(tabName: string): Promise<void> {
   const { api, spreadsheetId } = await getSheets();
   const rows = await readSheet(tabName);
-  if (rows.length <= 1) return; // only header or empty
-  const lastCol = columnToLetter(Math.max(rows[0]?.length || 1, 1));
-  const range = `'${tabName}'!A2:${lastCol}${rows.length}`;
+  if (rows.length === 0) return;
+
+  // Tabs with defined headers: clear from row 2. Tabs without (like Eval Matrix): clear everything.
+  const hasDefinedHeaders = REQUIRED_TABS.some((t) => t.name === tabName && t.headers);
+  const startRow = hasDefinedHeaders ? 2 : 1;
+  if (rows.length < startRow) return;
+
+  const maxCols = Math.max(...rows.map((r) => r.length), 1);
+  const lastCol = columnToLetter(maxCols);
+  const range = `'${tabName}'!A${startRow}:${lastCol}${rows.length}`;
   await api.spreadsheets.values.clear({ spreadsheetId, range });
   invalidateCache(tabName);
 }
@@ -559,6 +566,18 @@ function parseSheetDate(val: string): string {
   return val;
 }
 
+export function clearLinkedInSearches(): Promise<void> {
+  return withLock(async () => {
+    const { api, spreadsheetId } = await getSheets();
+    const rows = await readSheet("1.15 - LinkedIn Searches");
+    if (rows.length <= 1) return;
+    const maxCols = Math.max(...rows.map((r) => r.length), 1);
+    const lastCol = columnToLetter(maxCols);
+    await api.spreadsheets.values.clear({ spreadsheetId, range: `'1.15 - LinkedIn Searches'!A2:${lastCol}${rows.length}` });
+    invalidateCache("1.15 - LinkedIn Searches");
+  });
+}
+
 export function addLinkedInSearch(search: Omit<LinkedInSearch, "id">): Promise<LinkedInSearch> {
   return withLock(() => _addLinkedInSearch(search));
 }
@@ -617,8 +636,35 @@ async function _getProfiles(): Promise<CandidateProfile[]> {
     feedback: r["Feedback"] || "",
     roleRelevance: (r["Role Relevance"] || "") as RoleRelevance,
     source: r["Source"] || "",
-    dateAdded: r["Date Added"] || "",
+    dateAdded: parseSheetDate(r["Date Added"] || ""),
   }));
+}
+
+export function addProfile(profile: Omit<CandidateProfile, "id">): Promise<CandidateProfile> {
+  return withLock(() => _addProfile(profile));
+}
+async function _addProfile(profile: Omit<CandidateProfile, "id">): Promise<CandidateProfile> {
+  const id = `P-${uuidv4().slice(0, 8)}`;
+  await appendRows("1.2 - Profiles", [[
+    id,
+    profile.firstName,
+    profile.lastName,
+    profile.headline,
+    profile.location,
+    profile.currentTitle,
+    profile.currentCompany,
+    profile.email,
+    profile.phone,
+    profile.profileUrl,
+    profile.activeProject,
+    profile.notes,
+    profile.feedback,
+    profile.roleRelevance || "",
+    profile.source,
+    profile.dateAdded || new Date().toISOString().split("T")[0],
+  ]]);
+  invalidateCache("1.2 - Profiles");
+  return { ...profile, id };
 }
 
 export function importProfilesFromCSV(csvData: string): Promise<{ imported: number; duplicates: number }> {
@@ -1005,8 +1051,8 @@ async function _getShortlistCandidates(): Promise<ShortlistCandidate[]> {
     sms: r["SMS"] || "",
     channelConnect: r["Channel Connect"] || "",
     source: r["Source"] || "",
-    dateOfTransfer: r["Date of Transfer"] || "",
-    lastAction: r["Last Action"] || "",
+    dateOfTransfer: parseSheetDate(r["Date of Transfer"] || ""),
+    lastAction: parseSheetDate(r["Last Action"] || ""),
     toBeTransfer: r["To be Transfer"] || "",
   }));
 }
@@ -1095,8 +1141,8 @@ async function _getInterviewCandidates(): Promise<InterviewCandidate[]> {
     notes: r["Notes"] || "",
     candidatePriority: r["Candidate Priority"] || "",
     source: r["Source"] || "",
-    dateOfTransfer: r["Date of Transfer"] || "",
-    lastAction: r["Last Action"] || "",
+    dateOfTransfer: parseSheetDate(r["Date of Transfer"] || ""),
+    lastAction: parseSheetDate(r["Last Action"] || ""),
     strEmailStatus: r["STR Email Status"] || "",
     currentStage: (r["Current Stage"] || "") as InterviewStage,
   }));
