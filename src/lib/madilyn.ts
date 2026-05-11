@@ -50,32 +50,35 @@ export type PositionFields = Record<string, string>;
 // LLM Client (AWS Bedrock)
 // ============================================================
 
-const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
-const BEDROCK_REGION = process.env.AWS_REGION || "us-east-1";
+const GROQ_MODEL_ID = process.env.GROQ_MODEL_ID || "meta-llama/llama-4-scout-17b-16e-instruct";
 
 async function callLLM(
   system: string,
   messages: { role: "user" | "assistant"; content: string }[],
   maxTokens = 4096
 ): Promise<string> {
-  const token = process.env.AWS_BEARER_TOKEN_BEDROCK;
-  if (!token) throw new Error("AWS_BEARER_TOKEN_BEDROCK not set. Add it in Settings.");
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY not set. Add it in Settings.");
 
-  const url = `https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/model/${encodeURIComponent(BEDROCK_MODEL_ID)}/converse`;
+  const url = "https://api.groq.com/openai/v1/chat/completions";
   const body = {
-    system: [{ text: system }],
-    messages: messages.map((m) => ({ role: m.role, content: [{ text: m.content }] })),
-    inferenceConfig: { maxTokens, temperature: 0.7 },
+    model: GROQ_MODEL_ID,
+    messages: [
+      { role: "system" as const, content: system },
+      ...messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+    ],
+    max_tokens: maxTokens,
+    temperature: 0.7,
   };
 
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(body),
   });
-  if (!res.ok) { const err = await res.text(); throw new Error(`Bedrock API error (${res.status}): ${err}`); }
+  if (!res.ok) { const err = await res.text(); throw new Error(`Groq API error (${res.status}): ${err}`); }
   const data = await res.json();
-  return data.output?.message?.content?.[0]?.text || "";
+  return data.choices?.[0]?.message?.content || "";
 }
 
 // ============================================================
@@ -131,16 +134,16 @@ const JD_SYSTEM = `You are a position-creation assistant. Your ONLY job is to he
 ## Workflow
 1. If transcript provided → extract ALL fields you can, output a fields block, then IMMEDIATELY ask about 2-3 unfilled fields with a suggestions block in the SAME response
 2. EVERY response MUST end with a suggestions block asking about unfilled fields — NEVER leave the user without a next question
-3. When the TA answers, update fields and ask about the next 2-3 gaps
-4. When all critical fields are filled, say "JD complete" and stop
+3. When the TA answers, update fields and ask about the NEXT unfilled fields. NEVER re-ask about fields already in [CONTEXT]. Check the CONTEXT carefully before asking.
+4. ONLY say "JD complete" when ALL 29 fields listed above are filled — count them. If any field is missing, keep asking.
 
 ## Output Formats
-Field updates:
+Field updates — use \`\`\`fields code fence:
 \`\`\`fields
 {"roleTitle":"...","department":"..."}
 \`\`\`
 
-Questions with clickable options (ALWAYS include when asking):
+Questions with clickable options — use \`\`\`suggestions code fence:
 \`\`\`suggestions
 [{"id":"q1","text":"Reporting to?","options":[{"id":"a","text":"VP Eng"},{"id":"b","text":"CTO"},{"id":"c","text":"Director"}],"allowCustom":true}]
 \`\`\`
@@ -148,7 +151,7 @@ Questions with clickable options (ALWAYS include when asking):
 ## Style
 - 1-2 sentences max per response section. No fluff.
 - List extracted fields briefly, then ask gaps.
-- Every question MUST have a suggestions block with options.`;
+- Every question MUST have a \`\`\`suggestions block with options.`;
 
 const PERSONA_SYSTEM = `You are a persona-building assistant. Your ONLY job is to create structured candidate personas from a completed JD by asking the TA priority/trade-off questions.
 
@@ -238,23 +241,46 @@ You will be given the JD and a list of interview rounds with their keys. For EAC
 [{"roundKey":"rs","skillArea":"Motivation","objective":"Assess genuine interest","questions":"Why this role?","goodAnswer":"Specific, references mission","badAnswer":"Generic, only about comp"}]
 \`\`\``;
 
+const GENERAL_SYSTEM = `You are Marlyn, an AI hiring assistant for HV Talent Tracker. Help the TA (Talent Acquisition) team with questions about their hiring pipeline, candidates, interview processes, sourcing strategies, and general recruiting guidance.
+
+Be concise and direct. 1-3 sentences per response unless more detail is needed. No fluff or pleasantries.`;
+
+// ============================================================
+// General Chat (for pages without specific modes)
+// ============================================================
+
+export async function generalChat(sessionId: string, userMessage: string, contextKey: string) {
+  db.ensureSession(sessionId);
+
+  const messages = db.getMessages(sessionId, contextKey);
+  const trimmed = trimMessages(messages, 12);
+  const llmMessages = [...trimmed, { role: "user" as const, content: userMessage }];
+
+  const assistantMsg = await callLLM(GENERAL_SYSTEM, llmMessages);
+  messages.push({ role: "user", content: userMessage });
+  messages.push({ role: "assistant", content: assistantMsg });
+  db.saveMessages(sessionId, contextKey, messages);
+
+  return { message: cleanMessageForDisplay(assistantMsg) };
+}
+
 // ============================================================
 // JD Phase
 // ============================================================
 
-export async function processTranscript(sessionId: string, transcript: string) {
+export async function processTranscript(sessionId: string, transcript: string, contextKey: string = "jd") {
   db.ensureSession(sessionId);
   db.updateSessionMeta(sessionId, { jdPhase: "transcript_review", activeMode: "jd", transcript });
 
   const summaryPromise = callLLM(TRANSCRIPT_SUMMARY_SYSTEM, [{ role: "user", content: transcript }], 1024);
 
   const userMsg = `Kickoff call transcript. Extract all info for the position form. Ask about gaps with suggested answers.\n\n<transcript>\n${transcript}\n</transcript>`;
-  const messages = db.getMessages(sessionId, "jd");
+  const messages = db.getMessages(sessionId, contextKey);
   messages.push({ role: "user", content: userMsg });
 
   const assistantMsg = await callLLM(JD_SYSTEM, messages);
   messages.push({ role: "assistant", content: assistantMsg });
-  db.saveMessages(sessionId, "jd", messages);
+  db.saveMessages(sessionId, contextKey, messages);
 
   const fields = extractFields(assistantMsg);
   let suggestions = extractSuggestions(assistantMsg);
@@ -274,7 +300,7 @@ export async function processTranscript(sessionId: string, transcript: string) {
     messages.push({ role: "user", content: followUpMsg });
     const followUpReply = await callLLM(JD_SYSTEM, trimMessages(messages, 12));
     messages.push({ role: "assistant", content: followUpReply });
-    db.saveMessages(sessionId, "jd", messages);
+    db.saveMessages(sessionId, contextKey, messages);
 
     const followUpSuggestions = extractSuggestions(followUpReply);
     const followUpFields = extractFields(followUpReply);
@@ -292,7 +318,7 @@ export async function processTranscript(sessionId: string, transcript: string) {
   return { message: displayMsg, fields, suggestions, transcriptSummary };
 }
 
-export async function jdChat(sessionId: string, userMessage: string) {
+export async function jdChat(sessionId: string, userMessage: string, contextKey: string = "jd") {
   db.ensureSession(sessionId);
   const meta = db.getSessionMeta(sessionId);
   if (meta.jdPhase === "greeting") db.updateSessionMeta(sessionId, { jdPhase: "conversation" });
@@ -301,14 +327,14 @@ export async function jdChat(sessionId: string, userMessage: string) {
   const filledKeys = Object.keys(currentFields).filter((k) => currentFields[k]);
   const contextNote = `\n[CONTEXT: Filled: ${filledKeys.join(", ") || "none"} | Values: ${JSON.stringify(currentFields)}]`;
 
-  const messages = db.getMessages(sessionId, "jd");
+  const messages = db.getMessages(sessionId, contextKey);
   const trimmed = trimMessages(messages, 12);
   const llmMessages = [...trimmed, { role: "user" as const, content: userMessage + contextNote }];
 
   const assistantMsg = await callLLM(JD_SYSTEM, llmMessages);
   messages.push({ role: "user", content: userMessage });
   messages.push({ role: "assistant", content: assistantMsg });
-  db.saveMessages(sessionId, "jd", messages);
+  db.saveMessages(sessionId, contextKey, messages);
 
   const fields = extractFields(assistantMsg);
   const suggestions = extractSuggestions(assistantMsg);
@@ -324,10 +350,10 @@ export async function jdChat(sessionId: string, userMessage: string) {
 // Persona Phase
 // ============================================================
 
-export async function startPersonaWorkshop(sessionId: string) {
+export async function startPersonaWorkshop(sessionId: string, contextKey: string = "persona") {
   db.ensureSession(sessionId);
   const existingPersonas = db.getPersonas(sessionId);
-  const existingMessages = db.getMessages(sessionId, "persona");
+  const existingMessages = db.getMessages(sessionId, contextKey);
 
   // If already have personas, return existing state
   if (existingMessages.length > 0 && existingPersonas.length > 0) {
@@ -341,7 +367,7 @@ export async function startPersonaWorkshop(sessionId: string) {
   }
 
   db.updateSessionMeta(sessionId, { activeMode: "persona", personaPhase: "param_discovery" });
-  db.saveMessages(sessionId, "persona", []); // fresh
+  db.saveMessages(sessionId, contextKey, []); // fresh
 
   const fields = db.getJdFields(sessionId);
   const meta = db.getSessionMeta(sessionId);
@@ -378,7 +404,7 @@ export async function startPersonaWorkshop(sessionId: string) {
     if (followUpDisplay) displayMsg = displayMsg ? `${displayMsg}\n\n${followUpDisplay}` : followUpDisplay;
   }
 
-  db.saveMessages(sessionId, "persona", messages);
+  db.saveMessages(sessionId, contextKey, messages);
 
   if (personas.length > 0) {
     db.savePersonas(sessionId, personas.map(structuredToDbPersona.bind(null, sessionId)));
@@ -391,21 +417,21 @@ export async function startPersonaWorkshop(sessionId: string) {
   return { message: displayMsg, suggestions, activeParams, personas };
 }
 
-export async function personaChat(sessionId: string, userMessage: string) {
+export async function personaChat(sessionId: string, userMessage: string, contextKey: string = "persona") {
   db.ensureSession(sessionId);
   db.updateSessionMeta(sessionId, { activeMode: "persona" });
 
   const fields = db.getJdFields(sessionId);
   const jdSummary = `\n[JD: ${JSON.stringify(fields)}]`;
 
-  const messages = db.getMessages(sessionId, "persona");
+  const messages = db.getMessages(sessionId, contextKey);
   const trimmed = trimMessages(messages, 10);
   const llmMessages = [...trimmed, { role: "user" as const, content: userMessage + jdSummary }];
 
   const assistantMsg = await callLLM(PERSONA_SYSTEM, llmMessages);
   messages.push({ role: "user", content: userMessage });
   messages.push({ role: "assistant", content: assistantMsg });
-  db.saveMessages(sessionId, "persona", messages);
+  db.saveMessages(sessionId, contextKey, messages);
 
   const suggestions = extractSuggestions(assistantMsg);
   const personas = extractPersonas(assistantMsg);
@@ -472,7 +498,6 @@ export async function generateEvalMatrix(sessionId: string) {
   const jdContext = buildJdContext(fields);
   const summaryCtx = meta.transcriptSummary ? `\n\nKickoff Summary:\n${meta.transcriptSummary}` : "";
 
-  // Get enabled rounds
   const rounds = db.getRounds(sessionId).filter((r) => r.enabled);
   const roundsList = rounds.map((r) => `- ${r.roundKey}: ${r.roundName}`).join("\n");
 
@@ -598,20 +623,110 @@ function structuredToDbPersona(sessionId: string, p: StructuredPersona): db.Pers
 }
 
 // ============================================================
+// JSON Extraction Utilities
+// Handles both ```block``` code fences and plain "Header\n[JSON]" formats
+// ============================================================
+
+function findJsonAfterLabel(text: string, labelPattern: RegExp): string | null {
+  const m = text.match(labelPattern);
+  if (!m || m.index === undefined) return null;
+  const rest = text.substring(m.index + m[0].length);
+  const bStart = rest.search(/[\[{]/);
+  if (bStart === -1 || bStart > 30) return null;
+  const open = rest[bStart];
+  const close = open === '[' ? ']' : '}';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = bStart; i < rest.length; i++) {
+    const c = rest[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === open) depth++;
+    else if (c === close) { depth--; if (depth === 0) return rest.substring(bStart, i + 1); }
+  }
+  return null;
+}
+
+function stripLabeledJsonBlocks(text: string, labels: RegExp[]): string {
+  for (const label of labels) {
+    for (let safety = 0; safety < 10; safety++) {
+      const m = text.match(label);
+      if (!m || m.index === undefined) break;
+      const rest = text.substring(m.index + m[0].length);
+      const bStart = rest.search(/[\[{]/);
+      if (bStart === -1 || bStart > 30) break;
+      const open = rest[bStart];
+      const close = open === '[' ? ']' : '}';
+      let depth = 0, inStr = false, esc = false, end = -1;
+      for (let i = bStart; i < rest.length; i++) {
+        const c = rest[i];
+        if (esc) { esc = false; continue; }
+        if (c === '\\') { esc = true; continue; }
+        if (c === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (c === open) depth++;
+        else if (c === close) { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) break;
+      text = text.substring(0, m.index) + text.substring(m.index + m[0].length + end + 1);
+    }
+  }
+  return text;
+}
+
+function extractJsonBlock(
+  text: string,
+  fenceName: string,
+  headerPatterns: RegExp[],
+  validate?: (parsed: any) => boolean
+): string | null {
+  const fenceRegex = new RegExp('```' + fenceName + '\\s*\\n?([\\s\\S]*?)\\n?```');
+  const m = text.match(fenceRegex);
+  if (m) return m[1];
+  const jsonFence = /```json\s*\n?([\s\S]*?)\n?```/g;
+  let jm;
+  while ((jm = jsonFence.exec(text)) !== null) {
+    const inner = jm[1].trim();
+    if (!inner.startsWith('[') && !inner.startsWith('{')) continue;
+    if (validate) {
+      try { if (!validate(JSON.parse(inner))) continue; } catch { continue; }
+    }
+    return inner;
+  }
+  for (const pat of headerPatterns) {
+    const found = findJsonAfterLabel(text, pat);
+    if (!found) continue;
+    if (validate) {
+      try { if (!validate(JSON.parse(found))) continue; } catch { continue; }
+    }
+    return found;
+  }
+  return null;
+}
+
+// ============================================================
 // Extraction Helpers
 // ============================================================
 
+const isPlainObject = (v: any) => v && typeof v === 'object' && !Array.isArray(v);
+const isArrayWith = (key: string) => (v: any) => Array.isArray(v) && v.length > 0 && v[0][key] !== undefined;
+const isStringArray = (v: any) => Array.isArray(v) && v.every((x: any) => typeof x === 'string');
+
 function extractFields(text: string): PositionFields {
-  const m = text.match(/```fields\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return {};
-  try { return JSON.parse(m[1]); } catch { return {}; }
+  const raw = extractJsonBlock(text, 'fields', [/\bFields?\b\s*:?\s*\n?/i], isPlainObject);
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
 }
 
 function extractSuggestions(text: string): SuggestionQuestion[] {
-  const m = text.match(/```suggestions\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
+  const raw = extractJsonBlock(text, 'suggestions', [
+    /\bTrade-off\s*Questions?\b\s*:?\s*\n?/i,
+    /\bSuggestions?\b\s*:?\s*\n?/i,
+  ], isArrayWith('text'));
+  if (!raw) return [];
   try {
-    const parsed = JSON.parse(m[1]);
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.map((q: any, i: number) => ({
       id: q.id || `q${i + 1}`, text: q.text || "",
@@ -624,10 +739,10 @@ function extractSuggestions(text: string): SuggestionQuestion[] {
 }
 
 function extractPersonas(text: string): StructuredPersona[] {
-  const m = text.match(/```personas\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
+  const raw = extractJsonBlock(text, 'personas', [/\bPersonas?\b\s*:?\s*\n?/i], isArrayWith('name'));
+  if (!raw) return [];
   try {
-    const parsed = JSON.parse(m[1]);
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.map((p: any, i: number) => ({
       id: p.id || `persona-${i + 1}`, name: p.name || `Persona ${i + 1}`, priority: p.priority || i + 1,
@@ -638,48 +753,58 @@ function extractPersonas(text: string): StructuredPersona[] {
 }
 
 function extractActiveParams(text: string): string[] {
-  const m = text.match(/```active_params\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
-  try { const p = JSON.parse(m[1]); return Array.isArray(p) ? p : []; } catch { return []; }
+  const raw = extractJsonBlock(text, 'active_params', [
+    /\bActive\s*Parameters?\b\s*:?\s*\n?/i,
+    /\bactive_params\b\s*:?\s*\n?/,
+  ], isStringArray);
+  if (!raw) return [];
+  try { const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; }
 }
 
 function extractLinkedInStrings(text: string): LinkedInSearchString[] {
-  const m = text.match(/```linkedin_strings\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
+  const raw = extractJsonBlock(text, 'linkedin_strings', [/\bLinkedIn\s*Strings?\b\s*:?\s*\n?/i], isArrayWith('primary'));
+  if (!raw) return [];
   try {
-    const p = JSON.parse(m[1]);
+    const p = JSON.parse(raw);
     if (!Array.isArray(p)) return [];
     return p.map((s: any) => ({ personaId: s.personaId || "", personaName: s.personaName || "", primary: s.primary || "", alternate: s.alternate || undefined }));
   } catch { return []; }
 }
 
 function extractEvalMatrix(text: string): EvalMatrixEntry[] {
-  const m = text.match(/```eval_matrix\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
+  const raw = extractJsonBlock(text, 'eval_matrix', [
+    /\bEval(?:uation)?\s*Matrix\b\s*:?\s*\n?/i,
+  ], (v: any) => Array.isArray(v) && v.length > 0 && (v[0].skillArea || v[0].skill_area || v[0].roundKey || v[0].round_key));
+  if (!raw) return [];
   try {
-    const p = JSON.parse(m[1]);
+    const p = JSON.parse(raw);
     if (!Array.isArray(p)) return [];
+    const str = (v: any) => Array.isArray(v) ? v.join("\n") : (v || "");
     return p.map((e: any) => ({
       roundKey: e.roundKey || e.round_key || e.round || "",
       round: e.round || e.roundKey || "",
-      skillArea: e.skillArea || e.skill_area || "",
-      objective: e.objective || "",
-      questions: e.questions || "",
-      goodAnswer: e.goodAnswer || e.good_answer || "",
-      badAnswer: e.badAnswer || e.bad_answer || "",
+      skillArea: str(e.skillArea || e.skill_area),
+      objective: str(e.objective),
+      questions: str(e.questions),
+      goodAnswer: str(e.goodAnswer || e.good_answer),
+      badAnswer: str(e.badAnswer || e.bad_answer),
     }));
   } catch { return []; }
 }
 
 export function cleanMessageForDisplay(text: string): string {
-  return text
-    .replace(/```fields\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```suggestions\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```personas\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```active_params\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```linkedin_strings\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```eval_matrix\s*\n?[\s\S]*?\n?```/g, "")
-    .trim();
+  text = text
+    .replace(/```(?:fields|suggestions|personas|active_params|linkedin_strings|eval_matrix|analysis|json)\s*\n?[\s\S]*?\n?```/g, "");
+  text = stripLabeledJsonBlocks(text, [
+    /\bActive\s*Parameters?\b\s*:?\s*\n?/i,
+    /\bPersonas?\b\s*:?\s*\n?/i,
+    /\bTrade-off\s*Questions?\b\s*:?\s*\n?/i,
+    /\bSuggestions?\b\s*:?\s*\n?/i,
+    /\bLinkedIn\s*Strings?\b\s*:?\s*\n?/i,
+    /\bEval(?:uation)?\s*Matrix\b\s*:?\s*\n?/i,
+    /\bFields?\b\s*:?\s*\n?/i,
+  ]);
+  return text.trim();
 }
 
 export function getGreeting(): string {

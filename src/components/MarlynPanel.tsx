@@ -15,26 +15,81 @@ interface ChatMessage { role: "user" | "assistant" | "system"; content: string; 
 // Helpers — clean raw DB messages for display
 // ============================================================
 
+function findJsonAfterLabel(text: string, labelPattern: RegExp): string | null {
+  const m = text.match(labelPattern);
+  if (!m || m.index === undefined) return null;
+  const rest = text.substring(m.index + m[0].length);
+  const bStart = rest.search(/[\[{]/);
+  if (bStart === -1 || bStart > 30) return null;
+  const open = rest[bStart];
+  const close = open === '[' ? ']' : '}';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = bStart; i < rest.length; i++) {
+    const c = rest[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === open) depth++;
+    else if (c === close) { depth--; if (depth === 0) return rest.substring(bStart, i + 1); }
+  }
+  return null;
+}
+
+function stripLabeledJsonBlocks(text: string, labels: RegExp[]): string {
+  for (const label of labels) {
+    for (let safety = 0; safety < 10; safety++) {
+      const m = text.match(label);
+      if (!m || m.index === undefined) break;
+      const rest = text.substring(m.index + m[0].length);
+      const bStart = rest.search(/[\[{]/);
+      if (bStart === -1 || bStart > 30) break;
+      const open = rest[bStart];
+      const close = open === '[' ? ']' : '}';
+      let depth = 0, inStr = false, esc = false, end = -1;
+      for (let i = bStart; i < rest.length; i++) {
+        const c = rest[i];
+        if (esc) { esc = false; continue; }
+        if (c === '\\') { esc = true; continue; }
+        if (c === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (c === open) depth++;
+        else if (c === close) { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) break;
+      text = text.substring(0, m.index) + text.substring(m.index + m[0].length + end + 1);
+    }
+  }
+  return text;
+}
+
 function cleanForDisplay(text: string): string {
-  return text
-    .replace(/```fields\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```suggestions\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```personas\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```active_params\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```linkedin_strings\s*\n?[\s\S]*?\n?```/g, "")
-    .replace(/```eval_matrix\s*\n?[\s\S]*?\n?```/g, "")
+  text = text
+    .replace(/```(?:fields|suggestions|personas|active_params|linkedin_strings|eval_matrix|analysis|json)\s*\n?[\s\S]*?\n?```/g, "")
     .replace(/\n\[CONTEXT:[\s\S]*?\]/g, "")
     .replace(/\n\[JD:[\s\S]*?\]/g, "")
     .replace(/<transcript>[\s\S]*?<\/transcript>/g, "[Transcript uploaded]")
-    .replace(/^Kickoff call transcript\. Extract all info for the position form\. Ask about gaps with suggested answers\.\s*/g, "Uploaded kickoff call transcript.")
-    .trim();
+    .replace(/^Kickoff call transcript\. Extract all info for the position form\. Ask about gaps with suggested answers\.\s*/g, "Uploaded kickoff call transcript.");
+  text = stripLabeledJsonBlocks(text, [
+    /\bActive\s*Parameters?\b\s*:?\s*\n?/i,
+    /\bPersonas?\b\s*:?\s*\n?/i,
+    /\bTrade-off\s*Questions?\b\s*:?\s*\n?/i,
+    /\bSuggestions?\b\s*:?\s*\n?/i,
+    /\bLinkedIn\s*Strings?\b\s*:?\s*\n?/i,
+    /\bEval(?:uation)?\s*Matrix\b\s*:?\s*\n?/i,
+    /\bFields?\b\s*:?\s*\n?/i,
+  ]);
+  return text.trim();
 }
 
 function extractSuggestionsFromText(text: string): SuggestionQuestion[] {
   const m = text.match(/```suggestions\s*\n?([\s\S]*?)\n?```/);
-  if (!m) return [];
+  let raw: string | undefined = m?.[1];
+  if (!raw) raw = findJsonAfterLabel(text, /\bTrade-off\s*Questions?\b\s*:?\s*\n?/i) ?? undefined;
+  if (!raw) raw = findJsonAfterLabel(text, /\bSuggestions?\b\s*:?\s*\n?/i) ?? undefined;
+  if (!raw) return [];
   try {
-    const parsed = JSON.parse(m[1]);
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.map((q: any, i: number) => ({
       id: q.id || `q${i + 1}`, text: q.text || "",
@@ -203,39 +258,60 @@ function SuggestionButtons({ suggestions, onSubmit, disabled }: {
 
 const PANEL_WIDTH = 380;
 
-export function MarlynPanel({ mode, sessionId = "default", onOpenChange }: { mode: "jd" | "persona"; sessionId?: string; onOpenChange?: (open: boolean) => void }) {
+function getGreetingForContext(mode: string, modeLabel: string): string {
+  if (mode === "jd") return "I'll help fill the position creation form. Upload a kickoff transcript or start answering questions.";
+  if (mode === "persona") return "I'll help build candidate personas. Click \"Generate Initial Personas\" on the left, or ask me directly to generate or refine personas.";
+  return `I'm Marlyn, your hiring assistant. Ask me anything about ${modeLabel.toLowerCase()}.`;
+}
+
+export function MarlynPanel({ contextKey, mode, modeLabel, sessionId = "default", onOpenChange }: {
+  contextKey: string; mode: "jd" | "persona" | "general"; modeLabel: string; sessionId?: string; onOpenChange?: (open: boolean) => void;
+}) {
   const [open, _setOpen] = useState(false);
   const setOpen = useCallback((v: boolean) => { _setOpen(v); onOpenChange?.(v); }, [onOpenChange]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [loadedMode, setLoadedMode] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Load chat history when panel opens or mode changes
-  const loadHistory = useCallback(() => {
-    if (!open) return;
-    fetch(`/api/madilyn/state?sessionId=${sessionId}&chatContext=${mode}`)
+  const cacheRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  const activeKeyRef = useRef(contextKey);
+  const messagesRef = useRef<ChatMessage[]>([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+    if (messages.length > 0) {
+      cacheRef.current.set(activeKeyRef.current, messages);
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    if (activeKeyRef.current !== contextKey && messagesRef.current.length > 0) {
+      cacheRef.current.set(activeKeyRef.current, messagesRef.current);
+    }
+    activeKeyRef.current = contextKey;
+
+    const cached = cacheRef.current.get(contextKey);
+    if (cached && cached.length > 0) {
+      setMessages(cached);
+      return;
+    }
+
+    fetch(`/api/madilyn/state?sessionId=${sessionId}&chatContext=${contextKey}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.messages?.length > 0) {
-          setMessages(rawToDisplayMessages(data.messages));
-        } else if (mode === "jd") {
-          fetch(`/api/madilyn/state?sessionId=${sessionId}`)
-            .then((r) => r.json())
-            .then((d) => { if (d.greeting) setMessages([{ role: "assistant", content: d.greeting }]); });
-        } else if (mode === "persona") {
-          setMessages([{ role: "assistant", content: "I'll help build candidate personas. Click \"Generate Initial Personas\" on the left, or ask me directly to generate or refine personas." }]);
+          const msgs = rawToDisplayMessages(data.messages);
+          setMessages(msgs);
+          cacheRef.current.set(contextKey, msgs);
         } else {
-          setMessages([]);
+          setMessages([{ role: "assistant", content: getGreetingForContext(mode, modeLabel) }]);
         }
-        setLoadedMode(mode);
+      })
+      .catch(() => {
+        setMessages([{ role: "assistant", content: getGreetingForContext(mode, modeLabel) }]);
       });
-  }, [open, mode, sessionId]);
-
-  useEffect(() => {
-    if (open && loadedMode !== mode) loadHistory();
-  }, [open, mode, loadedMode, loadHistory]);
+  }, [contextKey, sessionId, mode, modeLabel]);
 
   // Listen for external events (transcript upload, persona workshop start)
   useEffect(() => {
@@ -296,7 +372,7 @@ export function MarlynPanel({ mode, sessionId = "default", onOpenChange }: { mod
       const res = await fetch("/api/madilyn/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, message: msg, mode }),
+        body: JSON.stringify({ sessionId, message: msg, mode, contextKey }),
       });
       const data = await res.json();
 
@@ -319,8 +395,6 @@ export function MarlynPanel({ mode, sessionId = "default", onOpenChange }: { mod
   const handleSuggestionSubmit = (answers: Record<string, string>) => {
     sendMessage(Object.values(answers).join("\n"));
   };
-
-  const modeLabel = mode === "jd" ? "JD Builder" : "Persona Workshop";
 
   return (
     <>
@@ -401,7 +475,7 @@ export function MarlynPanel({ mode, sessionId = "default", onOpenChange }: { mod
           <div className="flex gap-2">
             <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-              placeholder={mode === "jd" ? "Ask about the JD..." : "Discuss personas..."}
+              placeholder={mode === "jd" ? "Ask about the JD..." : mode === "persona" ? "Discuss personas..." : "Ask Marlyn..."}
               className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
               disabled={loading} />
             <button onClick={() => sendMessage()} disabled={loading || !input.trim()}

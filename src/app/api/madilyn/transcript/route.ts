@@ -4,6 +4,7 @@ export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const sessionId = formData.get("sessionId") as string;
+    const contextKey = (formData.get("contextKey") as string) || "position";
     const file = formData.get("file") as File;
 
     if (!sessionId) return Response.json({ error: "sessionId required" }, { status: 400 });
@@ -14,7 +15,7 @@ export async function POST(request: Request) {
 
     if (!transcript.trim()) return Response.json({ error: "No transcript provided" }, { status: 400 });
 
-    const result = await processTranscript(sessionId, transcript);
+    const result = await processTranscript(sessionId, transcript, contextKey);
     return Response.json(result);
   } catch (error: any) {
     console.error("Madilyn transcript error:", error);

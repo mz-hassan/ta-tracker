@@ -122,6 +122,7 @@ export default function PositionPage() {
     try {
       const formData = new FormData();
       formData.append("sessionId", "default");
+      formData.append("contextKey", "position");
       formData.append("file", file);
       const res = await fetch("/api/madilyn/transcript", { method: "POST", body: formData });
       const data = await res.json();

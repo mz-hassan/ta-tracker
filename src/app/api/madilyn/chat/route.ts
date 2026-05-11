@@ -1,14 +1,14 @@
-import { jdChat, personaChat } from "@/lib/madilyn";
+import { jdChat, personaChat, generalChat } from "@/lib/madilyn";
 
 export async function POST(request: Request) {
   try {
-    const { sessionId, message, mode } = await request.json();
+    const { sessionId, message, mode, contextKey } = await request.json();
     if (!sessionId || !message) {
       return Response.json({ error: "sessionId and message required" }, { status: 400 });
     }
 
     if (mode === "persona") {
-      const result = await personaChat(sessionId, message);
+      const result = await personaChat(sessionId, message, contextKey || "persona");
       return Response.json({
         message: result.message,
         suggestions: result.suggestions,
@@ -18,7 +18,15 @@ export async function POST(request: Request) {
       });
     }
 
-    const result = await jdChat(sessionId, message);
+    if (mode === "general") {
+      const result = await generalChat(sessionId, message, contextKey || "general");
+      return Response.json({
+        message: result.message,
+        mode: "general",
+      });
+    }
+
+    const result = await jdChat(sessionId, message, contextKey || "jd");
     return Response.json({
       message: result.message,
       fields: result.fields,

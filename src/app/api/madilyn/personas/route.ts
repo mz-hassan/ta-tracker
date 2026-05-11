@@ -2,8 +2,9 @@ import { startPersonaWorkshop, reorderPersonas, editPersonaParam } from "@/lib/m
 
 export async function POST(request: Request) {
   try {
-    const { sessionId, action, personas, personaId, param } = await request.json();
+    const { sessionId, contextKey, action, personas, personaId, param } = await request.json();
     const sid = sessionId || "default";
+    const ctxKey = contextKey || "process";
 
     if (action === "reorder" && Array.isArray(personas)) {
       reorderPersonas(sid, personas);
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
       return Response.json({ success: true });
     }
 
-    const result = await startPersonaWorkshop(sid);
+    const result = await startPersonaWorkshop(sid, ctxKey);
     return Response.json({
       message: result.message,
       suggestions: result.suggestions,

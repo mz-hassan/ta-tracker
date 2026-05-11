@@ -116,7 +116,7 @@ export default function ProcessPage() {
       const res = await fetch("/api/madilyn/personas", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: "default" }),
+        body: JSON.stringify({ sessionId: "default", contextKey: "process" }),
       });
       const data = await res.json();
       if (data.personas?.length > 0) {
@@ -140,7 +140,7 @@ export default function ProcessPage() {
     await fetch("/api/madilyn/personas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: "default", action: "add_param", personaId, param: { key, value } }),
+      body: JSON.stringify({ sessionId: "default", contextKey: "process", action: "add_param", personaId, param: { key, value } }),
     });
   };
 
@@ -148,7 +148,7 @@ export default function ProcessPage() {
     await fetch("/api/madilyn/personas", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: "default", action: "reorder", personas: p }),
+      body: JSON.stringify({ sessionId: "default", contextKey: "process", action: "reorder", personas: p }),
     }).catch(() => {});
   };
 

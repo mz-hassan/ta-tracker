@@ -5,21 +5,31 @@ import { usePathname } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { MarlynPanel } from "./MarlynPanel";
 
-function getMarlynMode(pathname: string): "jd" | "persona" | null {
-  if (pathname.startsWith("/position") || pathname.startsWith("/opening")) return "jd";
-  if (pathname.startsWith("/process")) return "persona";
-  if (pathname.startsWith("/evaluation-matrix")) return "jd";
-  return null;
+function getTabConfig(pathname: string): { contextKey: string; mode: "jd" | "persona" | "general"; modeLabel: string } {
+  if (pathname.startsWith("/position") || pathname.startsWith("/opening"))
+    return { contextKey: "position", mode: "jd", modeLabel: "JD Builder" };
+  if (pathname.startsWith("/process"))
+    return { contextKey: "process", mode: "persona", modeLabel: "Persona Workshop" };
+  if (pathname.startsWith("/evaluation-matrix"))
+    return { contextKey: "evaluation-matrix", mode: "jd", modeLabel: "Eval Matrix" };
+  const key = pathname === "/" ? "dashboard" : pathname.split("/")[1] || "dashboard";
+  const labels: Record<string, string> = {
+    dashboard: "Dashboard", profiles: "Profiles", inbound: "Inbound",
+    shortlist: "Shortlist", interviews: "Interviews", offers: "Offers",
+    candidates: "Candidates", sheets: "Sheets", settings: "Settings",
+    "linkedin-searches": "LinkedIn Searches",
+  };
+  return { contextKey: key, mode: "general", modeLabel: labels[key] || "Assistant" };
 }
 
 const PANEL_WIDTH = 380;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const mode = getMarlynMode(pathname);
+  const { contextKey, mode, modeLabel } = getTabConfig(pathname);
   const [panelOpen, setPanelOpen] = useState(false);
 
-  const mainPaddingRight = mode && panelOpen ? PANEL_WIDTH : 0;
+  const mainPaddingRight = panelOpen ? PANEL_WIDTH : 0;
 
   return (
     <div className="flex min-h-screen">
@@ -30,7 +40,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         {children}
       </main>
-      {mode && <MarlynPanel mode={mode} onOpenChange={setPanelOpen} />}
+      <MarlynPanel contextKey={contextKey} mode={mode} modeLabel={modeLabel} onOpenChange={setPanelOpen} />
     </div>
   );
 }

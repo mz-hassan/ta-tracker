@@ -7,8 +7,8 @@ export async function GET() {
     const config = loadConfig();
     return Response.json({
       ...config,
-      hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
-      awsRegion: process.env.AWS_REGION || "us-east-1",
+      hasGroqKey: !!process.env.GROQ_API_KEY,
+      groqModel: process.env.GROQ_MODEL_ID || "meta-llama/llama-4-scout-17b-16e-instruct",
       hasLinkedinCookie: !!process.env.LINKEDIN_LI_AT,
     });
   } catch (error) {
@@ -19,11 +19,11 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { sheetUrl, credentialsPath, bedrockToken, awsRegion, linkedinCookie } = body;
+    const { sheetUrl, credentialsPath, groqApiKey, groqModel, linkedinCookie } = body;
 
     // Save credentials to process env (persists for this server session)
-    if (bedrockToken) process.env.AWS_BEARER_TOKEN_BEDROCK = bedrockToken;
-    if (awsRegion) process.env.AWS_REGION = awsRegion;
+    if (groqApiKey) process.env.GROQ_API_KEY = groqApiKey;
+    if (groqModel) process.env.GROQ_MODEL_ID = groqModel;
     if (linkedinCookie) process.env.LINKEDIN_LI_AT = linkedinCookie;
 
     // If only updating env vars (no sheet URL), return early
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
       const existing = loadConfig();
       return Response.json({
         ...existing,
-        hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
+        hasGroqKey: !!process.env.GROQ_API_KEY,
         hasLinkedinCookie: !!process.env.LINKEDIN_LI_AT,
         success: true,
       });
@@ -69,14 +69,14 @@ export async function POST(request: Request) {
     } catch (connectError: any) {
       return Response.json({
         ...config,
-        hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
+        hasGroqKey: !!process.env.GROQ_API_KEY,
         warning: `Config saved but connection failed: ${connectError.message}. Make sure the sheet is shared with the service account email.`,
       });
     }
 
     return Response.json({
       ...config,
-      hasBedrockToken: !!process.env.AWS_BEARER_TOKEN_BEDROCK,
+      hasGroqKey: !!process.env.GROQ_API_KEY,
       success: true,
     });
   } catch (error: any) {

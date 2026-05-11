@@ -18,8 +18,8 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [sheetUrl, setSheetUrl] = useState("");
   const [credentialsPath, setCredentialsPath] = useState("");
-  const [bedrockToken, setBedrockToken] = useState("");
-  const [awsRegion, setAwsRegion] = useState("us-east-1");
+  const [groqApiKey, setGroqApiKey] = useState("");
+  const [groqModel, setGroqModel] = useState("meta-llama/llama-4-scout-17b-16e-instruct");
   const [linkedinCookie, setLinkedinCookie] = useState("");
   const [message, setMessage] = useState<{
     type: "success" | "error" | "warning";
@@ -45,7 +45,7 @@ export default function SettingsPage() {
       const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheetUrl, credentialsPath, bedrockToken, awsRegion, linkedinCookie }),
+        body: JSON.stringify({ sheetUrl, credentialsPath, groqApiKey, groqModel, linkedinCookie }),
       });
       const data = await res.json();
 
@@ -166,35 +166,35 @@ export default function SettingsPage() {
           </p>
         </div>
 
-        {/* AWS Bedrock (Marlyn AI) */}
+        {/* Groq (Marlyn AI) */}
         <div className="space-y-3 pt-4 border-t border-slate-200">
-          <h2 className="text-lg font-semibold text-slate-800">Marlyn (AI via AWS Bedrock)</h2>
+          <h2 className="text-lg font-semibold text-slate-800">Marlyn (AI via Groq)</h2>
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-slate-700">
-              Bedrock Bearer Token
+              Groq API Key
             </label>
             <input
               type="password"
-              value={bedrockToken}
-              onChange={(e) => setBedrockToken(e.target.value)}
-              placeholder="ABSK..."
+              value={groqApiKey}
+              onChange={(e) => setGroqApiKey(e.target.value)}
+              placeholder="gsk_..."
               className="w-full px-4 py-3 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
             />
           </div>
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-slate-700">
-              AWS Region
+              Model
             </label>
             <input
               type="text"
-              value={awsRegion}
-              onChange={(e) => setAwsRegion(e.target.value)}
-              placeholder="us-east-1"
+              value={groqModel}
+              onChange={(e) => setGroqModel(e.target.value)}
+              placeholder="meta-llama/llama-4-scout-17b-16e-instruct"
               className="w-full px-4 py-3 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
             />
           </div>
           <p className="text-xs text-slate-500">
-            Required for Marlyn AI assistant. Uses Claude Sonnet via Amazon Bedrock.
+            Required for Marlyn AI assistant. Uses Llama via Groq.
           </p>
         </div>
 
